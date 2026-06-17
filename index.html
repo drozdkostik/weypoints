@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🛩️ Waypoints Transformer</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js" onerror="window.PLOTLY_FAILED=true"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif; }
+  body { display: flex; height: 100vh; background: #1a1a1a; color: #ccc; overflow: hidden; }
+  #panel { width: 340px; background: #2a2a2a; display: flex; flex-direction: column; overflow-y: auto; border-right: 1px solid #444; }
+  #panel h1 { background: #0078d4; color: #fff; font-size: 15px; padding: 14px; text-align: center; }
+  .section { margin: 10px; background: #333; border-radius: 6px; padding: 12px; }
+  .section h2 { color: #0078d4; font-size: 12px; margin-bottom: 8px; }
+  button { background: #0078d4; color: #fff; border: none; padding: 9px; border-radius: 4px; cursor: pointer; width: 100%; font-weight: bold; margin-top: 6px; font-size: 13px; }
+  button:hover { background: #0a8ae0; }
+  button.green { background: #4caf50; } button.orange { background: #ff9800; } button.red { background: #f44336; } button.gray { background: #555; }
+  button:disabled { background: #444; color: #777; cursor: not-allowed; }
+  button.active { background: #2196f3; }
+  .row { display: flex; gap: 6px; }
+  label { font-size: 12px; display: block; margin: 8px 0 3px; }
+  input[type=number], input[type=range], select { width: 100%; padding: 6px; background: #444; color: #fff; border: 1px solid #555; border-radius: 4px; }
+  input[type=range] { padding: 0; }
+  /* num input inside slider row — compact */
+  .slider-row { display: flex; align-items: center; gap: 6px; }
+  .slider-row input[type=range] { flex: 1; min-width: 0; }
+  .slider-row input[type=number] { width: 72px; flex: none; text-align: right; }
+  .slider-row .unit { font-size: 12px; color: #aaa; flex: none; }
+  .chk { display:flex; align-items:center; gap:6px; font-size:12px; margin-top:6px; }
+  .chk input { width:auto; }
+  .info { font-size: 12px; line-height: 1.6; white-space: pre-line; color: #bbb; }
+  .file-name { font-size: 11px; color: #4caf50; margin-bottom: 6px; word-break: break-all; }
+  #right { flex: 1; display: flex; flex-direction: column; }
+  #toolbar { background: #0078d4; color: #fff; padding: 8px 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  #toolbar .title { font-weight: bold; flex: 1; }
+  #toolbar button { width: auto; padding: 6px 14px; background: #3a3a3a; }
+  #toolbar .z-ctrl { display:none; align-items:center; gap:6px; font-size:12px; background:#005a9e; padding:4px 8px; border-radius:4px; }
+  #toolbar .z-ctrl input { width: 90px; }
+  #view-container { flex: 1; position: relative; background:#1a1a1a; }
+  #canvas2d { position: absolute; inset: 0; width:100%; height:100%; cursor: crosshair; }
+  #map { position: absolute; inset: 0; display: none; }
+  #plot3d { position: absolute; inset: 0; display: none; background: #1a1a1a; }
+  #status { background: #0078d4; color: #fff; padding: 6px 14px; font-size: 12px; }
+  table { width: 100%; font-size: 11px; border-collapse: collapse; margin-top: 6px; }
+  th { background: #0078d4; color: #fff; padding: 4px; }
+  td { padding: 3px; text-align: center; border-bottom: 1px solid #444; }
+  tr.sel { background: #0078d4; color:#fff; }
+  .tbl-wrap { max-height: 200px; overflow-y: auto; }
+  .hint { font-size: 11px; color: #888; margin-top: 6px; }
+  .wp-marker { width:14px; height:14px; border-radius:50%; border:2px solid #fff; cursor:pointer; box-shadow:0 0 4px #000; }
+</style>
+</head>
+<body>
+
+<div id="panel">
+  <h1>⚙️ Waypoints Transformer</h1>
+
+  <div class="section">
+    <h2>📂 ФАЙЛ</h2>
+    <div class="file-name" id="fileName">Файл не вибрано</div>
+    <input type="file" id="fileInput" style="display:none">
+    <button onclick="document.getElementById('fileInput').click()">📁 Вибрати файл</button>
+  </div>
+
+  <div class="section">
+    <h2>📊 ІНФОРМАЦІЯ</h2>
+    <div class="info" id="infoBox">Завантажте файл</div>
+  </div>
+
+  <div class="section">
+    <h2>🔄 ТРАНСФОРМАЦІЯ</h2>
+    <label>Опора обертання</label>
+    <select id="rotateFrom"><option value="center">Центр фігури</option><option value="end">Кінцева точка</option></select>
+    <label>Кут: <span id="angleVal">0</span>°</label>
+    <div class="slider-row">
+      <input type="range" id="angle" min="-360" max="360" value="0" step="1">
+      <input type="number" id="angleNum" value="0" min="-360" max="360" step="1">
+      <span class="unit">°</span>
+    </div>
+    <label>Опора масштабу</label>
+    <select id="scaleFrom"><option value="center">Центр фігури</option><option value="end">Кінцева точка</option></select>
+    <label>Масштаб: <span id="scaleVal">1.0</span>x</label>
+    <div class="slider-row">
+      <input type="range" id="scale" min="0.1" max="3" value="1" step="0.1">
+      <input type="number" id="scaleNum" value="1.0" min="0.1" max="3" step="0.1">
+      <span class="unit">×</span>
+    </div>
+    <button class="orange" onclick="resetTransform()">↺ Скинути трансформацію</button>
+  </div>
+
+  <div class="section">
+    <h2>🗺️ ШАРИ КАРТИ</h2>
+    <div class="chk"><input type="checkbox" id="chkBorder" checked onchange="toggleBorder()"><label style="margin:0">Кордон України</label></div>
+  </div>
+
+  <div class="section">
+    <h2>✏️ РЕДАГУВАННЯ</h2>
+    <div class="row">
+      <button id="btnView" class="active" onclick="setEdit(false)">👁️ Перегляд</button>
+      <button id="btnEdit" class="gray" onclick="setEdit(true)">✏️ Редагування</button>
+    </div>
+    <div class="hint">
+      <b>Схема:</b> тягнути пусте — навігація; тягнути маркер — рух; 2× на лінії — вставити; 2× на пустому — додати.<br>
+      <b>Карта:</b> навігація (пан/зум) як завжди, незалежно від режиму; тягнути маркер — рух; 2× — додати.<br>
+      <b>3D:</b> клік — вибрати; колесо (ред.) — висота.
+    </div>
+    <label>Висота вибраної точки (м)</label>
+    <input type="number" id="altInput" value="0" step="5" disabled>
+    <button class="red" id="btnDel" onclick="deleteSelected()" disabled>🗑️ Видалити вибрану</button>
+  </div>
+
+  <div class="section">
+    <h2>📋 WAYPOINTS</h2>
+    <div class="tbl-wrap">
+      <table id="wpTable"><thead><tr><th>ID</th><th>Lat</th><th>Lon</th><th>Alt</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+
+  <div class="section">
+    <button class="green" onclick="saveFile()">💾 ЗБЕРЕГТИ ЗМІНИ</button>
+    <button class="orange" onclick="resetAll()">↺ СКИНУТИ ВСЕ</button>
+  </div>
+</div>
+
+<div id="right">
+  <div id="toolbar">
+    <span class="title">📈 ПЕРЕГЛЯД</span>
+    <div class="z-ctrl" id="zCtrl">
+      <span>📐 Висота ×:</span>
+      <input type="range" id="zExag" min="1" max="50" value="1" step="1">
+      <span id="zExagVal">1×</span>
+    </div>
+    <button id="tabCanvas" class="active" onclick="switchView('canvas')">📊 Схема</button>
+    <button id="tabSat" onclick="switchView('sat')">🛰️ Супутник 3D</button>
+    <button id="tabOsm" onclick="switchView('osm')">🗺️ Карта 3D</button>
+    <button id="tab3d" onclick="switchView('3d')">🎯 Графік 3D</button>
+  </div>
+  <div id="view-container">
+    <canvas id="canvas2d"></canvas>
+    <div id="map"></div>
+    <div id="plot3d"></div>
+  </div>
+  <div id="status">Завантажте файл .waypoints, щоб почати</div>
+</div>
+
+<script>
+const EARTH_R=6371.0, M_PER_DEG=111000.0, PREC=14, ALT_PREC=6;
+const UA_GEOJSON="https://raw.githubusercontent.com/georgique/world-geojson/develop/countries/ukraine.json";
+
+let state = {
+  header:"QGC WPL 110", wps:[], baseline:[], editMode:false,
+  view:"canvas", selected:null, fileName:"mission.waypoints", showBorder:true
+};
+let uaBorderData=null;
+
+// Canvas
+let nav={panX:0,panY:0,zoom:1};
+let dragPoint=null, draggingView=false, mouseStart={x:0,y:0};
+// Track whether a mousedown–mousemove actually moved (to distinguish click from drag in edit mode)
+let canvasDragMoved=false;
+let screenPts=[], bounds2d=null;
+
+// MapLibre
+let map=null, mapLoaded=false, mapMarkers=[], mapStyleType="sat";
+let plot3dInited=false;
+
+const canvas=document.getElementById('canvas2d');
+const ctx=canvas.getContext('2d');
+
+// ───────── МОДЕЛЬ ─────────
+function parseFile(text){
+  const lines=text.split(/\r?\n/);
+  if(!lines.length||!lines[0].includes("QGC WPL 110"))return false;
+  state.header=lines[0].trim(); state.wps=[];
+  for(let i=1;i<lines.length;i++){ const line=lines[i].trim(); if(!line)continue;
+    const p=line.includes("\t")?line.split("\t"):line.split(/\s+/);
+    if(p.length>=11){ const lat=parseFloat(p[8]),lon=parseFloat(p[9]),alt=parseFloat(p[10]);
+      if(!isNaN(lat)&&!isNaN(lon))state.wps.push({raw:p.slice(),id:p[0],lat,lon,alt:isNaN(alt)?0:alt}); } }
+  snapshot(); return state.wps.length>0;
+}
+function syncRaw(w){ while(w.raw.length<12)w.raw.push("0");
+  w.raw[8]=w.lat.toFixed(PREC); w.raw[9]=w.lon.toFixed(PREC); w.raw[10]=w.alt.toFixed(ALT_PREC); }
+function buildText(){ let o=state.header+"\n"; state.wps.forEach(w=>{syncRaw(w);o+=w.raw.join("\t")+"\n";}); return o; }
+function snapshot(){ state.baseline=state.wps.map(w=>({lat:w.lat,lon:w.lon,alt:w.alt})); }
+function restoreBaseline(){ state.wps.forEach((w,i)=>{ if(i<state.baseline.length){
+  w.lat=state.baseline[i].lat;w.lon=state.baseline[i].lon;w.alt=state.baseline[i].alt;syncRaw(w);} }); }
+function valid(){ return state.wps.filter(w=>w.lat!==0||w.lon!==0); }
+function center(){ const v=valid(); if(!v.length)return null;
+  return {lat:v.reduce((s,w)=>s+w.lat,0)/v.length, lon:v.reduce((s,w)=>s+w.lon,0)/v.length}; }
+function endPoint(){ const v=valid(); return v.length?{lat:v[v.length-1].lat,lon:v[v.length-1].lon}:null; }
+function totalDistance(){ const v=valid(); if(v.length<2)return 0; let t=0;
+  for(let i=0;i<v.length-1;i++){ const a1=v[i].lat*Math.PI/180,o1=v[i].lon*Math.PI/180,
+    a2=v[i+1].lat*Math.PI/180,o2=v[i+1].lon*Math.PI/180,da=a2-a1,dlo=o2-o1;
+    const a=Math.sin(da/2)**2+Math.cos(a1)*Math.cos(a2)*Math.sin(dlo/2)**2; t+=EARTH_R*2*Math.asin(Math.sqrt(a)); } return t; }
+function rotatePoint(lat,lon,cLat,cLon,deg){ const lonM=M_PER_DEG*Math.cos(cLat*Math.PI/180);
+  const dx=(lon-cLon)*lonM,dy=(lat-cLat)*M_PER_DEG,a=-deg*Math.PI/180,ca=Math.cos(a),sa=Math.sin(a);
+  return [cLat+(dx*sa+dy*ca)/M_PER_DEG, cLon+(dx*ca-dy*sa)/lonM]; }
+function applyTransform(){
+  if(!state.wps.length||state.editMode)return; restoreBaseline();
+  const angle=+document.getElementById("angle").value,scale=+document.getElementById("scale").value;
+  const rf=document.getElementById("rotateFrom").value,sf=document.getElementById("scaleFrom").value;
+  if(angle!==0){ const c=rf==="end"?endPoint():center();
+    if(c)state.wps.forEach(w=>{ if(w.lat===0&&w.lon===0)return;
+      const r=rotatePoint(w.lat,w.lon,c.lat,c.lon,angle);w.lat=r[0];w.lon=r[1];syncRaw(w);}); }
+  if(scale!==1&&scale>0){ const c=sf==="end"?endPoint():center();
+    if(c){ const lonM=M_PER_DEG*Math.cos(c.lat*Math.PI/180);
+      state.wps.forEach(w=>{ if(w.lat===0&&w.lon===0)return;
+        const dx=(w.lon-c.lon)*lonM,dy=(w.lat-c.lat)*M_PER_DEG;
+        w.lon=c.lon+dx*scale/lonM;w.lat=c.lat+dy*scale/M_PER_DEG;syncRaw(w);}); } }
+  refreshAll();
+}
+function addWaypoint(lat,lon,alt){ if(alt==null)alt=state.wps.length?state.wps[state.wps.length-1].alt:50;
+  const id=state.wps.length,raw=[String(id),"0","3","16","0","0","0","0",
+    lat.toFixed(PREC),lon.toFixed(PREC),alt.toFixed(ALT_PREC),"1"];
+  state.wps.push({raw,id:String(id),lat,lon,alt}); renumber(); snapshot(); return state.wps.length-1; }
+function insertWaypoint(position,lat,lon,alt){
+  if(alt==null){ const a=state.wps[position-1],b=state.wps[position];
+    alt=(a&&b)?(a.alt+b.alt)/2:(a?a.alt:(b?b.alt:50)); }
+  const raw=["0","0","3","16","0","0","0","0",
+    lat.toFixed(PREC),lon.toFixed(PREC),alt.toFixed(ALT_PREC),"1"];
+  state.wps.splice(position,0,{raw,id:"0",lat,lon,alt}); renumber(); snapshot(); return position; }
+function moveWaypoint(i,lat,lon){ const w=state.wps[i]; if(!w)return; w.lat=lat;w.lon=lon;syncRaw(w);
+  if(i<state.baseline.length){state.baseline[i].lat=lat;state.baseline[i].lon=lon;} }
+function setAltitude(i,alt){ const w=state.wps[i]; if(!w)return; w.alt=Math.max(0,alt);syncRaw(w);
+  if(i<state.baseline.length)state.baseline[i].alt=w.alt; }
+function deleteWaypoint(i){ if(i<0||i>=state.wps.length)return false; state.wps.splice(i,1);renumber();snapshot();return true; }
+function renumber(){ state.wps.forEach((w,i)=>{w.id=String(i);w.raw[0]=String(i);}); }
+
+function nearestSegmentByLatLon(lat,lon){
+  const v=state.wps.map((w,i)=>({w,i})).filter(o=>o.w.lat!==0||o.w.lon!==0);
+  if(v.length<2)return null;
+  const lonM=M_PER_DEG*Math.cos(lat*Math.PI/180);
+  const px=(lo)=>(lo-lon)*lonM, py=(la)=>(la-lat)*M_PER_DEG;
+  let best=null;
+  for(let k=0;k<v.length-1;k++){
+    const ax=px(v[k].w.lon),ay=py(v[k].w.lat),bx=px(v[k+1].w.lon),by=py(v[k+1].w.lat);
+    const dx=bx-ax,dy=by-ay,len2=dx*dx+dy*dy;
+    let t=len2>0?((0-ax)*dx+(0-ay)*dy)/len2:0; t=Math.max(0,Math.min(1,t));
+    const cx=ax+t*dx,cy=ay+t*dy,d=Math.hypot(cx,cy);
+    if(!best||d<best.dist){ best={dist:d,position:v[k+1].i,lat:lat+cy/M_PER_DEG,lon:lon+cx/lonM}; }
+  }
+  return best;
+}
+function handleDblInsert(lat,lon){
+  const seg=nearestSegmentByLatLon(lat,lon);
+  if(seg){
+    const v=valid(),lats=v.map(w=>w.lat),lons=v.map(w=>w.lon);
+    const cLat=(Math.min(...lats)+Math.max(...lats))/2, lonM=M_PER_DEG*Math.cos(cLat*Math.PI/180);
+    const wM=(Math.max(...lons)-Math.min(...lons))*lonM, hM=(Math.max(...lats)-Math.min(...lats))*M_PER_DEG;
+    const diag=Math.hypot(wM,hM)||1, threshold=diag*0.05;
+    if(seg.dist<=threshold){ const pos=insertWaypoint(seg.position,seg.lat,seg.lon,null);
+      state.selected=pos; refreshAll(); setStatus("Вставлено точку #"+pos+" на маршрут"); return; }
+  }
+  const idx=addWaypoint(lat,lon); state.selected=idx; refreshAll(); setStatus("Додано точку #"+idx+" в кінець");
+}
+
+// ───────── ЗАВАНТАЖЕННЯ КОРДОНУ УКРАЇНИ ─────────
+function loadBorder(){
+  if(uaBorderData)return Promise.resolve(uaBorderData);
+  return fetch(UA_GEOJSON).then(r=>r.json()).then(data=>{ uaBorderData=data; return data; })
+    .catch(()=>{ console.warn("Не вдалося завантажити кордон України"); return null; });
+}
+
+// ───────── MAPLIBRE ─────────
+function buildStyle(type){
+  const tiles = type==="sat"
+    ? ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}']
+    : ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'];
+  return { version:8,
+    sources:{ base:{ type:'raster', tiles:tiles, tileSize:256,
+      attribution: type==="sat"?'© Esri':'© OpenStreetMap' } },
+    layers:[{ id:'base', type:'raster', source:'base' }] };
+}
+function initMap(){
+  map=new maplibregl.Map({ container:'map', style:buildStyle('sat'),
+    center:[31.0,49.0], zoom:5, pitch:0, bearing:0,
+    maxPitch:85, doubleClickZoom:false });
+  map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'top-right');
+  // Pan/zoom/rotate always available regardless of edit mode
+  map.dragRotate.enable(); map.touchZoomRotate.enableRotation();
+  map.on('load',()=>{ mapLoaded=true; addBorderLayer(); addRouteLayers(); rebuildMarkers(); fitMapToRoute(true); });
+  map.on('dblclick',e=>{ if(!state.editMode)return; e.preventDefault(); handleDblInsert(e.lngLat.lat,e.lngLat.lng); });
+}
+
+function addBorderLayer(){
+  if(!map)return;
+  if(!map.getSource('ua-border')){
+    map.addSource('ua-border',{type:'geojson',data:{type:'FeatureCollection',features:[]}});
+    map.addLayer({ id:'ua-border-line', type:'line', source:'ua-border',
+      paint:{ 'line-color':'#ffd54f', 'line-width':3, 'line-opacity':0.9 } });
+  }
+  loadBorder().then(data=>{
+    if(data&&map.getSource('ua-border')){
+      map.getSource('ua-border').setData(data);
+      map.setLayoutProperty('ua-border-line','visibility',state.showBorder?'visible':'none');
+    }
+  });
+}
+
+function addRouteLayers(){
+  if(!map.getSource('route-stems')){
+    map.addSource('route-stems',{type:'geojson',data:emptyFC()});
+    map.addLayer({ id:'stems', type:'fill-extrusion', source:'route-stems',
+      paint:{ 'fill-extrusion-color':['get','color'],
+        'fill-extrusion-height':['get','height'],
+        'fill-extrusion-base':0, 'fill-extrusion-opacity':0.85 } });
+  }
+  if(!map.getSource('route-tops')){
+    map.addSource('route-tops',{type:'geojson',data:emptyFC()});
+    map.addLayer({ id:'routetops', type:'circle', source:'route-tops',
+      paint:{ 'circle-radius':5, 'circle-color':['get','color'],
+        'circle-stroke-color':'#fff', 'circle-stroke-width':1.5,
+        'circle-pitch-alignment':'map' } });
+  }
+  if(!map.getSource('route-line')){
+    map.addSource('route-line',{type:'geojson',data:emptyFC()});
+    map.addLayer({ id:'routeline', type:'line', source:'route-line',
+      paint:{ 'line-color':'#2196f3', 'line-width':3 } });
+  }
+  if(!map.getSource('route-ground')){
+    map.addSource('route-ground',{type:'geojson',data:emptyFC()});
+    map.addLayer({ id:'routeground', type:'line', source:'route-ground',
+      paint:{ 'line-color':'#000', 'line-width':2, 'line-dasharray':[2,2], 'line-opacity':0.4 } });
+  }
+}
+function emptyFC(){ return {type:'FeatureCollection',features:[]}; }
+function squareAround(lon,lat,sizeM){
+  const lonM=M_PER_DEG*Math.cos(lat*Math.PI/180);
+  const dLon=(sizeM/2)/lonM, dLat=(sizeM/2)/M_PER_DEG;
+  return [[ [lon-dLon,lat-dLat],[lon+dLon,lat-dLat],
+            [lon+dLon,lat+dLat],[lon-dLon,lat+dLat],[lon-dLon,lat-dLat] ]];
+}
+
+function updateRouteLayers(){
+  if(!map||!mapLoaded)return;
+  const v=valid(); const zExag=+document.getElementById("zExag").value||1;
+
+  const stemFeats=[], topFeats=[];
+  v.forEach((w,k)=>{
+    const gi=globalIndexOfValid(k);
+    let color='#4caf50';
+    if(state.selected===gi)color='#ffeb3b';
+    else if(k===0)color='#2e7d32';
+    else if(k===v.length-1)color='#f44336';
+    const h=Math.max(0.1, w.alt*zExag);
+    stemFeats.push({ type:'Feature',
+      properties:{ color, height:h, gi },
+      geometry:{ type:'Polygon', coordinates:squareAround(w.lon,w.lat,15) } });
+    topFeats.push({ type:'Feature', properties:{ color },
+      geometry:{ type:'Point', coordinates:[w.lon,w.lat] } });
+  });
+  map.getSource('route-stems').setData({type:'FeatureCollection',features:stemFeats});
+  map.getSource('route-tops').setData({type:'FeatureCollection',features:topFeats});
+
+  const coords=v.map(w=>[w.lon,w.lat]);
+  const lineFC = coords.length>1?[{type:'Feature',geometry:{type:'LineString',coordinates:coords}}]:[];
+  map.getSource('route-line').setData({type:'FeatureCollection',features:lineFC});
+  map.getSource('route-ground').setData({type:'FeatureCollection',features:lineFC});
+}
+function globalIndexOfValid(localIdx){
+  const v=state.wps.map((w,i)=>({w,i})).filter(o=>o.w.lat!==0||o.w.lon!==0);
+  return v[localIdx]?v[localIdx].i:localIdx;
+}
+function rebuildMarkers(){
+  if(!map||!mapLoaded)return;
+  mapMarkers.forEach(m=>m.remove()); mapMarkers=[];
+  const v=state.wps.map((w,i)=>({w,i})).filter(o=>o.w.lat!==0||o.w.lon!==0);
+  v.forEach((o,k)=>{
+    const {w,i}=o;
+    const el=document.createElement('div'); el.className='wp-marker';
+    let bg='#4caf50'; if(k===0)bg='#2e7d32'; else if(k===v.length-1)bg='#f44336';
+    if(state.selected===i){ bg='#ffeb3b'; el.style.borderColor='#ff9800'; }
+    el.style.background=bg; el.title="#"+i+" • "+w.alt.toFixed(0)+" м";
+    const marker=new maplibregl.Marker({element:el,draggable:state.editMode})
+      .setLngLat([w.lon,w.lat]).addTo(map);
+    el.addEventListener('click',ev=>{ ev.stopPropagation(); selectPoint(i); });
+    marker.on('dragstart',()=>selectPoint(i));
+    marker.on('drag',()=>{ const ll=marker.getLngLat(); moveWaypoint(i,ll.lat,ll.lng); updateRouteLayers(); });
+    marker.on('dragend',()=>{ refreshTable(); refreshInfo(); });
+    mapMarkers.push(marker);
+  });
+  updateRouteLayers();
+}
+function fitMapToRoute(animate){
+  if(!map||!mapLoaded)return; const v=valid(); if(!v.length)return;
+  const b=new maplibregl.LngLatBounds(); v.forEach(w=>b.extend([w.lon,w.lat]));
+  map.fitBounds(b,{padding:60,duration:animate?600:0,pitch:map.getPitch()});
+}
+function setMapStyle(type){
+  if(!map)return; mapStyleType=type; map.setStyle(buildStyle(type));
+  map.once('styledata',()=>{ addBorderLayer(); addRouteLayers(); updateRouteLayers(); });
+}
+function toggleBorder(){
+  state.showBorder=document.getElementById("chkBorder").checked;
+  if(map&&mapLoaded&&map.getLayer('ua-border-line'))
+    map.setLayoutProperty('ua-border-line','visibility',state.showBorder?'visible':'none');
+}
+
+// ───────── 2D CANVAS ─────────
+function resizeCanvas(){ const r=canvas.getBoundingClientRect();
+  canvas.width=r.width;canvas.height=r.height; if(state.view==="canvas")draw2D(); }
+window.addEventListener('resize',resizeCanvas);
+function draw2D(){
+  const W=canvas.width,H=canvas.height;
+  ctx.clearRect(0,0,W,H); ctx.fillStyle="#222"; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle="#3a3a3a";ctx.lineWidth=1;
+  for(let x=0;x<W;x+=60){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  for(let y=0;y<H;y+=60){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+  const v=state.wps.map((w,i)=>({w,i})).filter(o=>o.w.lat!==0||o.w.lon!==0);
+  screenPts=[];bounds2d=null;
+  if(!v.length){ctx.fillStyle="#888";ctx.font="14px Arial";ctx.textAlign="center";ctx.fillText("Немає даних",W/2,H/2);return;}
+  const lons=v.map(o=>o.w.lon),lats=v.map(o=>o.w.lat);
+  let minLon=Math.min(...lons),maxLon=Math.max(...lons),minLat=Math.min(...lats),maxLat=Math.max(...lats);
+  const lr=(maxLon-minLon)||0.001,ar=(maxLat-minLat)||0.001,pad=0.15;
+  minLon-=lr*pad;maxLon+=lr*pad;minLat-=ar*pad;maxLat+=ar*pad;
+  const cLat=(minLat+maxLat)/2,lonM=M_PER_DEG*Math.cos(cLat*Math.PI/180);
+  const wMeters=(maxLon-minLon)*lonM,hMeters=(maxLat-minLat)*M_PER_DEG;
+  const margin=50,availW=W-2*margin,availH=H-2*margin;
+  const sc=Math.min(availW/wMeters,availH/hMeters);
+  const plotW=wMeters*sc,plotH=hMeters*sc;
+  const offX=margin+(availW-plotW)/2,offY=margin+(availH-plotH)/2;
+  bounds2d={minLon,maxLon,minLat,maxLat,lonM,sc,offX,offY,plotH};
+  function toPx(lon,lat){ let bx=offX+(lon-minLon)*lonM*sc, by=offY+plotH-(lat-minLat)*M_PER_DEG*sc;
+    return [(bx-W/2)*nav.zoom+W/2+nav.panX,(by-H/2)*nav.zoom+H/2+nav.panY]; }
+  ctx.strokeStyle="#2196f3";ctx.lineWidth=2.5;ctx.beginPath();
+  v.forEach((o,k)=>{const p=toPx(o.w.lon,o.w.lat);k===0?ctx.moveTo(p[0],p[1]):ctx.lineTo(p[0],p[1]);});ctx.stroke();
+  v.forEach((o,k)=>{ const p=toPx(o.w.lon,o.w.lat),x=p[0],y=p[1],sel=(state.selected===o.i);
+    if(k===0){ctx.fillStyle="#4caf50";ctx.fillRect(x-7,y-7,14,14);ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.strokeRect(x-7,y-7,14,14);
+      ctx.fillStyle="#4caf50";ctx.font="bold 10px Arial";ctx.textAlign="center";ctx.fillText("START",x,y-14);}
+    else if(k===v.length-1){ctx.beginPath();ctx.fillStyle="#f44336";ctx.moveTo(x,y-8);ctx.lineTo(x-8,y+8);ctx.lineTo(x+8,y+8);ctx.closePath();ctx.fill();
+      ctx.strokeStyle="#fff";ctx.lineWidth=1;ctx.stroke();ctx.fillStyle="#f44336";ctx.font="bold 10px Arial";ctx.fillText("END",x,y+22);}
+    else{ctx.beginPath();ctx.arc(x,y,5,0,2*Math.PI);ctx.fillStyle="#4caf50";ctx.fill();ctx.strokeStyle="#fff";ctx.lineWidth=1.5;ctx.stroke();}
+    if(sel){ctx.beginPath();ctx.arc(x,y,12,0,2*Math.PI);ctx.strokeStyle="#ffeb3b";ctx.lineWidth=2;ctx.stroke();}
+    if(state.editMode){ctx.fillStyle="#ffeb3b";ctx.font="bold 9px Arial";ctx.textAlign="center";ctx.fillText(String(o.i),x,(k===0||k===v.length-1)?y-26:y-12);}
+    screenPts.push({idx:o.i,x,y});
+  });
+  drawScaleBar(W,H,sc*nav.zoom);
+  ctx.fillStyle="#fff";ctx.font="bold 13px Arial";ctx.textAlign="center";ctx.fillText("📊 Схема (рівний масштаб)",W/2,20);
+  ctx.fillStyle="#888";ctx.font="11px Arial";
+  ctx.fillText(state.editMode?"Тягнути пусте — навігація | Тягнути маркер — рух | 2× — додати | ПКМ — скинути вигляд":"Drag — рух | Колесо — масштаб | ПКМ — скидання",W/2,40);
+}
+function drawScaleBar(W,H,pxPerMeter){ if(!isFinite(pxPerMeter)||pxPerMeter<=0)return;
+  let meters=100/pxPerMeter; const nice=[1,2,5,10,20,50,100,200,500,1000,2000,5000,10000,20000,50000,100000];
+  let chosen=nice[0]; for(const m of nice){if(m>=meters){chosen=m;break;}chosen=m;}
+  const barPx=chosen*pxPerMeter,x0=20,y0=H-25;
+  ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(x0,y0);ctx.lineTo(x0+barPx,y0);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x0,y0-4);ctx.lineTo(x0,y0+4);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x0+barPx,y0-4);ctx.lineTo(x0+barPx,y0+4);ctx.stroke();
+  ctx.fillStyle="#fff";ctx.font="10px Arial";ctx.textAlign="left";
+  ctx.fillText(chosen>=1000?(chosen/1000)+" км":chosen+" м",x0+barPx+6,y0+3); }
+function pixelToCoord(px,py){ const b=bounds2d; if(!b||nav.zoom===0)return null;
+  const W=canvas.width,H=canvas.height;
+  let bx=(px-W/2-nav.panX)/nav.zoom+W/2, by=(py-H/2-nav.panY)/nav.zoom+H/2;
+  let lon=b.minLon+(bx-b.offX)/(b.lonM*b.sc), lat=b.minLat+(b.offY+b.plotH-by)/(M_PER_DEG*b.sc);
+  return [lon,lat]; }
+function hitTest(px,py){ let bi=null,bd=12;
+  screenPts.forEach(p=>{const d=Math.hypot(p.x-px,p.y-py);if(d<=bd){bd=d;bi=p.idx;}}); return bi; }
+function getXY(e){const r=canvas.getBoundingClientRect();return[e.clientX-r.left,e.clientY-r.top];}
+
+// Canvas mouse events — support pan navigation in edit mode when dragging on empty space
+canvas.addEventListener('mousedown',e=>{
+  const xy=getXY(e);
+  mouseStart={x:xy[0],y:xy[1]};
+  canvasDragMoved=false;
+  if(state.editMode){
+    const hit=hitTest(xy[0],xy[1]);
+    if(hit!==null){ dragPoint=hit; selectPoint(hit); }
+    else { draggingView=true; } // empty space — may pan or just deselect on click
+    return;
+  }
+  draggingView=true;
+});
+
+canvas.addEventListener('mousemove',e=>{
+  const xy=getXY(e);
+  if(state.editMode&&dragPoint!==null){
+    const c=pixelToCoord(xy[0],xy[1]);
+    if(c){moveWaypoint(dragPoint,Math.max(-90,Math.min(90,c[1])),Math.max(-180,Math.min(180,c[0])));draw2D();}
+    return;
+  }
+  if(!draggingView)return;
+  const dx=xy[0]-mouseStart.x, dy=xy[1]-mouseStart.y;
+  if(Math.hypot(dx,dy)>3) canvasDragMoved=true;
+  nav.panX+=dx; nav.panY+=dy;
+  mouseStart={x:xy[0],y:xy[1]};
+  draw2D();
+});
+
+canvas.addEventListener('mouseup',()=>{
+  // In edit mode: if we were panning empty space but didn't move — treat as deselect click
+  if(state.editMode&&draggingView&&!canvasDragMoved) selectPoint(null);
+  if(dragPoint!==null){refreshTable();refreshInfo();}
+  dragPoint=null; draggingView=false;
+});
+
+canvas.addEventListener('dblclick',e=>{ if(!state.editMode)return; const xy=getXY(e);
+  if(hitTest(xy[0],xy[1])!==null)return;
+  const c=pixelToCoord(xy[0],xy[1]); if(c)handleDblInsert(Math.max(-90,Math.min(90,c[1])),Math.max(-180,Math.min(180,c[0]))); });
+canvas.addEventListener('wheel',e=>{e.preventDefault();nav.zoom*=(e.deltaY<0)?1.1:0.9;nav.zoom=Math.max(0.3,Math.min(8,nav.zoom));draw2D();},{passive:false});
+canvas.addEventListener('contextmenu',e=>{e.preventDefault();nav={panX:0,panY:0,zoom:1};draw2D();});
+window.addEventListener('keydown',e=>{if((e.key==="Delete"||e.key==="Backspace")&&state.editMode&&state.selected!=null)deleteSelected();});
+
+// ───────── 3D ГРАФІК (Plotly) ─────────
+function build3DData(){
+  const v=valid(); if(!v.length)return null;
+  const c=center(),lonM=M_PER_DEG*Math.cos(c.lat*Math.PI/180);
+  const zExag=+document.getElementById("zExag").value||1;
+  const xs=v.map(o=>(o.lon-c.lon)*lonM);
+  const ys=v.map(o=>(o.lat-c.lat)*M_PER_DEG);
+  const zs=v.map(o=>o.alt*zExag);
+  return {v,c,lonM,zExag,xs,ys,zs};
+}
+function draw3D(){
+  const el=document.getElementById('plot3d');
+  if(window.PLOTLY_FAILED||typeof Plotly==="undefined"){
+    el.innerHTML='<div style="color:#888;text-align:center;padding-top:40vh;">3D потребує Plotly (інтернет).</div>';return;}
+  const d=build3DData(); if(!d){Plotly.purge('plot3d');plot3dInited=false;return;}
+  const {v,xs,ys,zs,zExag}=d;
+  const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
+  const padX=(maxX-minX)*0.2||100,padY=(maxY-minY)*0.2||100;
+  const gx0=minX-padX,gx1=maxX+padX,gy0=minY-padY,gy1=maxY+padY;
+  const N=12,planeX=[],planeY=[],planeZ=[];
+  for(let i=0;i<=N;i++){const rx=[],ry=[],rz=[];
+    for(let j=0;j<=N;j++){rx.push(gx0+(gx1-gx0)*j/N);ry.push(gy0+(gy1-gy0)*i/N);rz.push(0);}
+    planeX.push(rx);planeY.push(ry);planeZ.push(rz);}
+  const ground={type:'surface',x:planeX,y:planeY,z:planeZ,showscale:false,opacity:0.35,
+    colorscale:[[0,'#2e4a2e'],[1,'#3a5a3a']],hoverinfo:'skip',
+    contours:{x:{show:true,color:'#557755',width:1},y:{show:true,color:'#557755',width:1}}};
+  const shadow={x:xs,y:ys,z:xs.map(()=>0),mode:'lines',type:'scatter3d',
+    line:{color:'#000',width:3,dash:'dot'},opacity:0.4,hoverinfo:'skip'};
+  const stemsX=[],stemsY=[],stemsZ=[];
+  v.forEach((o,i)=>{stemsX.push(xs[i],xs[i],null);stemsY.push(ys[i],ys[i],null);stemsZ.push(0,zs[i],null);});
+  const stems={x:stemsX,y:stemsY,z:stemsZ,mode:'lines',type:'scatter3d',
+    line:{color:'#888',width:1},opacity:0.5,hoverinfo:'skip'};
+  const path={x:xs,y:ys,z:zs,mode:'lines+markers',type:'scatter3d',line:{color:'#64b5f6',width:5},
+    marker:{size:v.map((w,i)=>state.selected===globalIndexOfValid(i)?11:(i===0||i===v.length-1?8:5)),
+      color:v.map((w,i)=>{const gi=globalIndexOfValid(i);return state.selected===gi?'#ffeb3b':(i===0?'#4caf50':(i===v.length-1?'#f44336':'#64b5f6'));}),
+      line:{color:'#fff',width:1}},
+    text:v.map((w,i)=>"#"+globalIndexOfValid(i)+"<br>alt: "+w.alt.toFixed(0)+" м<br>lat: "+w.lat.toFixed(5)+"<br>lon: "+w.lon.toFixed(5)),
+    hoverinfo:'text',customdata:v.map((w,i)=>globalIndexOfValid(i))};
+  const layout={paper_bgcolor:'#1a1a1a',font:{color:'#ccc'},margin:{l:0,r:0,t:30,b:0},showlegend:false,
+    title:{text:(state.editMode?'✏️ 3D Редагування':'🎯 3D')+(zExag!==1?' (висота ×'+zExag+')':'')+' — клік: вибір, колесо: висота',font:{color:'#fff',size:13}},
+    scene:{aspectmode:'data',
+      xaxis:{title:'Схід (м)',color:'#f44336',gridcolor:'#333'},
+      yaxis:{title:'Північ (м)',color:'#4caf50',gridcolor:'#333'},
+      zaxis:{title:'Висота (м)'+(zExag!==1?' ×'+zExag:''),color:'#2196f3',gridcolor:'#333'},
+      bgcolor:'#1a1a1a'}};
+  Plotly.react('plot3d',[ground,shadow,stems,path],layout,{responsive:true});
+  if(!plot3dInited){ plot3dInited=true;
+    document.getElementById('plot3d').on('plotly_click',ev=>{
+      if(!ev.points||!ev.points.length)return;
+      const pt=ev.points.find(p=>p.customdata!=null); if(pt)selectPoint(pt.customdata); }); }
+}
+
+// ───────── UI ─────────
+function isMapView(){return state.view==="sat"||state.view==="osm";}
+function selectPoint(i){ state.selected=i; const w=state.wps[i];
+  const a=document.getElementById("altInput"); if(w)a.value=w.alt.toFixed(1);
+  a.disabled=!(state.editMode&&i!=null);
+  document.getElementById("btnDel").disabled=!(state.editMode&&i!=null);
+  if(i!=null)setStatus("Вибрано точку #"+i);
+  if(state.view==="canvas")draw2D(); else if(isMapView())rebuildMarkers(); else draw3D();
+  refreshTable(); }
+function refreshTable(){ const tb=document.querySelector("#wpTable tbody");tb.innerHTML="";
+  state.wps.forEach((w,i)=>{ if(w.lat===0&&w.lon===0)return; const tr=document.createElement("tr");
+    if(state.selected===i)tr.className="sel";
+    tr.innerHTML="<td>"+w.id+"</td><td>"+w.lat.toFixed(5)+"</td><td>"+w.lon.toFixed(5)+"</td><td>"+w.alt.toFixed(0)+"</td>";
+    tr.onclick=()=>selectPoint(i);tb.appendChild(tr);}); }
+function refreshInfo(){ const b=document.getElementById("infoBox");
+  if(!state.wps.length){b.textContent="Завантажте файл";return;}
+  const c=center(),e=endPoint(),d=totalDistance(),n=valid().length;
+  const alts=valid().map(w=>w.alt),minA=Math.min(...alts),maxA=Math.max(...alts);
+  b.textContent="Точок: "+n+"\nДистанція: "+d.toFixed(2)+" км\nВисота: "+minA.toFixed(0)+"–"+maxA.toFixed(0)+" м\n\nЦентр:\n"+c.lat.toFixed(4)+"° "+c.lon.toFixed(4)+"°\n\nКінець:\n"+e.lat.toFixed(4)+"° "+e.lon.toFixed(4)+"°"; }
+function refreshAll(){ if(state.view==="canvas")draw2D(); else if(isMapView())rebuildMarkers(); else draw3D(); refreshTable();refreshInfo(); }
+function setStatus(t){document.getElementById("status").textContent=t;}
+
+function switchView(v){
+  state.view=v;
+  canvas.style.display=(v==="canvas")?"block":"none";
+  document.getElementById("map").style.display=isMapView()?"block":"none";
+  document.getElementById("plot3d").style.display=(v==="3d")?"block":"none";
+  document.getElementById("tabCanvas").classList.toggle("active",v==="canvas");
+  document.getElementById("tabSat").classList.toggle("active",v==="sat");
+  document.getElementById("tabOsm").classList.toggle("active",v==="osm");
+  document.getElementById("tab3d").classList.toggle("active",v==="3d");
+  document.getElementById("zCtrl").style.display=(v==="3d"||isMapView())?"flex":"none";
+  if(v==="canvas"){ resizeCanvas(); }
+  else if(isMapView()){
+    if(!map){ initMap(); }
+    else { if(mapStyleType!==v) setMapStyle(v);
+      setTimeout(()=>{ map.resize(); rebuildMarkers(); fitMapToRoute(true); },60); }
+  }
+  else { plot3dInited=false; draw3D(); }
+}
+
+function setEdit(on){ state.editMode=on;
+  const angle=+document.getElementById("angle").value,scale=+document.getElementById("scale").value;
+  if(on&&(angle!==0||scale!==1)){ snapshot();
+    setAngleUI(0); setScaleUI(1); }
+  document.getElementById("btnView").classList.toggle("active",!on);
+  document.getElementById("btnEdit").classList.toggle("active",on);
+  document.getElementById("btnView").classList.toggle("gray",on);
+  document.getElementById("btnEdit").classList.toggle("gray",!on);
+  document.getElementById("altInput").disabled=!(on&&state.selected!=null);
+  document.getElementById("btnDel").disabled=!(on&&state.selected!=null);
+  setStatus(on?"Режим редагування":"Режим перегляду"); refreshAll(); }
+
+function deleteSelected(){ if(state.selected==null)return; const i=state.selected;
+  if(deleteWaypoint(i)){state.selected=null;
+    document.getElementById("btnDel").disabled=true;document.getElementById("altInput").disabled=true;
+    refreshAll();setStatus("Точку #"+i+" видалено");} }
+
+// ───────── HELPERS для синхронізації UI кута/масштабу ─────────
+function setAngleUI(v){
+  v=Math.max(-360,Math.min(360,v));
+  document.getElementById("angle").value=v;
+  document.getElementById("angleNum").value=v;
+  document.getElementById("angleVal").textContent=v;
+}
+function setScaleUI(v){
+  v=Math.max(0.1,Math.min(3,v));
+  document.getElementById("scale").value=v;
+  document.getElementById("scaleNum").value=v.toFixed(1);
+  document.getElementById("scaleVal").textContent=v.toFixed(1);
+}
+
+function resetTransform(){
+  setAngleUI(0); setScaleUI(1); applyTransform();
+}
+function resetAll(){ resetTransform(); nav={panX:0,panY:0,zoom:1}; refreshAll(); setStatus("Скинуто"); }
+function saveFile(){ if(!state.wps.length){alert("Спочатку завантажте файл!");return;}
+  const blob=new Blob([buildText()],{type:"text/plain"});const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);a.download="modified_"+state.fileName;a.click();setStatus("Файл збережено"); }
+
+// ───────── СЛАЙДЕР + NUM INPUT — двостороння синхронізація ─────────
+document.getElementById("angle").addEventListener("input",e=>{
+  const v=+e.target.value;
+  document.getElementById("angleVal").textContent=v;
+  document.getElementById("angleNum").value=v;
+  applyTransform();
+});
+document.getElementById("angleNum").addEventListener("input",e=>{
+  const v=Math.max(-360,Math.min(360,+e.target.value||0));
+  document.getElementById("angle").value=v;
+  document.getElementById("angleVal").textContent=v;
+  applyTransform();
+});
+document.getElementById("angleNum").addEventListener("change",e=>{
+  // Clamp and reformat on blur/enter
+  const v=Math.max(-360,Math.min(360,+e.target.value||0));
+  setAngleUI(v); applyTransform();
+});
+
+document.getElementById("scale").addEventListener("input",e=>{
+  const v=+e.target.value;
+  document.getElementById("scaleVal").textContent=v.toFixed(1);
+  document.getElementById("scaleNum").value=v.toFixed(1);
+  applyTransform();
+});
+document.getElementById("scaleNum").addEventListener("input",e=>{
+  const v=Math.max(0.1,Math.min(3,+e.target.value||1));
+  document.getElementById("scale").value=v;
+  document.getElementById("scaleVal").textContent=v.toFixed(1);
+  applyTransform();
+});
+document.getElementById("scaleNum").addEventListener("change",e=>{
+  const v=Math.max(0.1,Math.min(3,+e.target.value||1));
+  setScaleUI(v); applyTransform();
+});
+
+document.getElementById("rotateFrom").addEventListener("change",applyTransform);
+document.getElementById("scaleFrom").addEventListener("change",applyTransform);
+document.getElementById("altInput").addEventListener("change",e=>{ if(state.selected!=null){
+  setAltitude(state.selected,+e.target.value);refreshAll();setStatus("Точка #"+state.selected+": висота = "+(+e.target.value).toFixed(0)+" м");}});
+document.getElementById("zExag").addEventListener("input",e=>{document.getElementById("zExagVal").textContent=e.target.value+"×";
+  if(state.view==="3d")draw3D(); else if(isMapView())updateRouteLayers(); });
+document.getElementById("plot3d").addEventListener("wheel",e=>{
+  if(state.view==="3d"&&state.editMode&&state.selected!=null){
+    e.preventDefault();
+    const step=(e.deltaY<0)?5:-5,w=state.wps[state.selected];
+    setAltitude(state.selected,(w.alt+step));
+    document.getElementById("altInput").value=state.wps[state.selected].alt.toFixed(1);
+    refreshTable();refreshInfo();draw3D();
+    setStatus("Точка #"+state.selected+": висота = "+state.wps[state.selected].alt.toFixed(0)+" м"); }
+},{passive:false});
+document.getElementById("fileInput").addEventListener("change",e=>{
+  const f=e.target.files[0];if(!f)return;state.fileName=f.name;
+  const r=new FileReader();
+  r.onload=ev=>{ if(parseFile(ev.target.result)){
+    document.getElementById("fileName").textContent="✅ "+f.name; resetTransform();
+    nav={panX:0,panY:0,zoom:1}; refreshInfo();refreshTable();
+    if(state.view==="canvas")resizeCanvas();
+    else if(isMapView()){ if(map&&mapLoaded){rebuildMarkers();fitMapToRoute(true);} }
+    else draw3D();
+    setStatus("Завантажено "+state.wps.length+" точок");
+  } else alert("Не вдалося розібрати файл! Потрібен формат QGC WPL 110"); };
+  r.readAsText(f); });
+
+resizeCanvas();
+</script>
+</body>
+</html>
