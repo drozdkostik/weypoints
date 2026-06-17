@@ -176,6 +176,8 @@ let plot3dInited=false;
 let _plot3dRAF=null;
 // Undo session guard for altitude wheel (one undo entry per continuous scroll)
 let _altUndoPushed=false, _altUndoTimer=null;
+// rAF batching for wheel: accumulate steps between frames, render once per frame
+let _3dWheelPending=0, _3dWheelRAF=null;
 
 const canvas=document.getElementById('canvas2d');
 const ctx=canvas.getContext('2d');
@@ -305,7 +307,7 @@ function buildStyle(type){
 }
 function initMap(){
   map=new maplibregl.Map({container:'map',style:buildStyle('sat'),center:[31.0,49.0],zoom:5,
-    pitch:0,bearing:0,maxPitch:85,doubleClickZoom:false});
+    pitch:50,bearing:-20,maxPitch:85,doubleClickZoom:false});
   map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'top-right');
   map.dragRotate.enable(); map.touchZoomRotate.enableRotation();
   map.on('load',()=>{ mapLoaded=true; addBorderLayer(); addRouteLayers(); rebuildMarkers(); fitMapToRoute(true); });
@@ -349,8 +351,33 @@ function addRouteLayers(){
     map.addLayer({id:'routeground',type:'line',source:'route-ground',
       paint:{'line-color':'#000','line-width':2,'line-dasharray':[2,2],'line-opacity':0.4}});
   }
+  if(!map.getSource('route-walls')){
+    map.addSource('route-walls',{type:'geojson',data:emptyFC()});
+    map.addLayer({id:'routewalls',type:'fill-extrusion',source:'route-walls',
+      paint:{'fill-extrusion-color':'#2196f3','fill-extrusion-height':['get','topH'],
+        'fill-extrusion-base':['get','baseH'],'fill-extrusion-opacity':0.4}});
+  }
 }
 function emptyFC(){ return {type:'FeatureCollection',features:[]}; }
+function buildWallFeatures(v,zExag){
+  const feats=[];
+  for(let k=0;k<v.length-1;k++){
+    const a=v[k],b=v[k+1];
+    const midLat=(a.lat+b.lat)/2;
+    const lonM=M_PER_DEG*Math.cos(midLat*Math.PI/180);
+    const dx=(b.lon-a.lon)*lonM,dy=(b.lat-a.lat)*M_PER_DEG;
+    const len=Math.hypot(dx,dy); if(len<0.1)continue;
+    const hw=3;
+    const nx=(-dy/len)*hw/lonM, ny=(dx/len)*hw/M_PER_DEG;
+    const altA=a.alt*zExag,altB=b.alt*zExag;
+    const baseH=Math.max(0,Math.min(altA,altB));
+    const topH=Math.max(baseH+0.5,Math.max(altA,altB));
+    feats.push({type:'Feature',properties:{baseH,topH},geometry:{type:'Polygon',
+      coordinates:[[[a.lon-nx,a.lat-ny],[b.lon-nx,b.lat-ny],
+        [b.lon+nx,b.lat+ny],[a.lon+nx,a.lat+ny],[a.lon-nx,a.lat-ny]]]}});
+  }
+  return feats;
+}
 function squareAround(lon,lat,sizeM){
   const lonM=M_PER_DEG*Math.cos(lat*Math.PI/180);
   const dLon=(sizeM/2)/lonM, dLat=(sizeM/2)/M_PER_DEG;
@@ -380,6 +407,8 @@ function updateRouteLayers(){
   const lineFC=coords.length>1?[{type:'Feature',geometry:{type:'LineString',coordinates:coords}}]:[];
   map.getSource('route-line').setData({type:'FeatureCollection',features:lineFC});
   map.getSource('route-ground').setData({type:'FeatureCollection',features:lineFC});
+  if(map.getSource('route-walls'))
+    map.getSource('route-walls').setData({type:'FeatureCollection',features:buildWallFeatures(v,zExag)});
 }
 
 // FAST update — only route lines (for during-drag, no polygon rebuild).
@@ -472,7 +501,8 @@ function rebuildMarkers(){
 function fitMapToRoute(animate){
   if(!map||!mapLoaded)return; const v=valid(); if(!v.length)return;
   const b=new maplibregl.LngLatBounds(); v.forEach(w=>b.extend([w.lon,w.lat]));
-  map.fitBounds(b,{padding:60,duration:animate?600:0,pitch:map.getPitch()});
+  const curPitch=map.getPitch();
+  map.fitBounds(b,{padding:60,duration:animate?600:0,pitch:curPitch<20?50:curPitch});
 }
 function setMapStyle(type){
   if(!map)return; mapStyleType=type; map.setStyle(buildStyle(type));
@@ -677,18 +707,18 @@ function draw3D(){
       const pt=ev.points.find(p=>p.customdata!=null); if(pt)selectPoint(pt.customdata); }); }
 }
 
-// FAST: restyle only stems (trace 2) + path z/markers (trace 3). No ground rebuild.
+// FAST: restyle only stems z (trace 2) + path z/markers (trace 3). No ground rebuild.
 function update3DFast(){
   if(!plot3dInited||window.PLOTLY_FAILED||typeof Plotly==="undefined"){scheduleDraw3D();return;}
   const d=build3DData(); if(!d){scheduleDraw3D();return;}
-  const{v,xs,ys,zs}=d;
-  const sx=[],sy=[],sz=[];
-  v.forEach((o,i)=>{sx.push(xs[i],xs[i],null);sy.push(ys[i],ys[i],null);sz.push(0,zs[i],null);});
+  const{v,zs}=d;
+  const sz=[];
+  v.forEach((o,i)=>{sz.push(0,zs[i],null);});
   const sizes=v.map((w,i)=>state.selected===globalIndexOfValid(i)?11:(i===0||i===v.length-1?8:5));
   const colors=v.map((w,i)=>{const gi=globalIndexOfValid(i);
     return state.selected===gi?'#ffeb3b':(i===0?'#4caf50':(i===v.length-1?'#f44336':'#64b5f6'));});
-  Plotly.restyle('plot3d',{x:[sx],y:[sy],z:[sz]},[2]);
-  Plotly.restyle('plot3d',{z:[zs],'marker.size':[sizes],'marker.color':[colors]},[3]);
+  Plotly.restyle('plot3d',{z:[sz,zs]},[2,3]);
+  Plotly.restyle('plot3d',{'marker.size':[sizes],'marker.color':[colors]},[3]);
 }
 
 // FAST: restyle only marker colors/sizes in path trace (selection change only).
@@ -858,20 +888,25 @@ document.getElementById("zExag").addEventListener("input",e=>{
   else if(isMapView())updateRouteLayers();
 });
 
-// 3D altitude wheel: Plotly.restyle only, one undo entry per continuous scroll session
+// 3D altitude wheel: accumulate steps between frames, render at most once per rAF
 document.getElementById("plot3d").addEventListener("wheel",e=>{
   if(state.view==="3d"&&state.editMode&&state.selected!=null){
     e.preventDefault();
-    // Push undo only at start of a scroll burst, not every tick
-    if(!_altUndoPushed){pushUndo();_altUndoPushed=true;}
-    clearTimeout(_altUndoTimer);
-    _altUndoTimer=setTimeout(()=>{_altUndoPushed=false;},800);
-    const step=(e.deltaY<0)?5:-5;
-    setAltitude(state.selected,(state.wps[state.selected].alt+step));
-    document.getElementById("altInput").value=state.wps[state.selected].alt.toFixed(1);
-    refreshTable(); refreshInfo();
-    update3DFast(); // restyle only — no Plotly.react
-    setStatus("Точка #"+state.selected+": висота = "+state.wps[state.selected].alt.toFixed(0)+" м");
+    _3dWheelPending+=(e.deltaY<0)?5:-5;
+    if(!_3dWheelRAF){
+      _3dWheelRAF=requestAnimationFrame(()=>{
+        _3dWheelRAF=null;
+        const totalStep=_3dWheelPending; _3dWheelPending=0;
+        if(!_altUndoPushed){pushUndo();_altUndoPushed=true;}
+        clearTimeout(_altUndoTimer);
+        _altUndoTimer=setTimeout(()=>{_altUndoPushed=false;},800);
+        setAltitude(state.selected,(state.wps[state.selected].alt+totalStep));
+        document.getElementById("altInput").value=state.wps[state.selected].alt.toFixed(1);
+        refreshTable(); refreshInfo();
+        update3DFast();
+        setStatus("Точка #"+state.selected+": висота = "+state.wps[state.selected].alt.toFixed(0)+" м");
+      });
+    }
   }
 },{passive:false});
 
