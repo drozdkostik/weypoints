@@ -23,7 +23,6 @@
   label { font-size: 12px; display: block; margin: 8px 0 3px; }
   input[type=number], input[type=range], select { width: 100%; padding: 6px; background: #444; color: #fff; border: 1px solid #555; border-radius: 4px; }
   input[type=range] { padding: 0; }
-  /* num input inside slider row — compact */
   .slider-row { display: flex; align-items: center; gap: 6px; }
   .slider-row input[type=range] { flex: 1; min-width: 0; }
   .slider-row input[type=number] { width: 72px; flex: none; text-align: right; }
@@ -49,7 +48,8 @@
   tr.sel { background: #0078d4; color:#fff; }
   .tbl-wrap { max-height: 200px; overflow-y: auto; }
   .hint { font-size: 11px; color: #888; margin-top: 6px; }
-  .wp-marker { width:14px; height:14px; border-radius:50%; border:2px solid #fff; cursor:pointer; box-shadow:0 0 4px #000; }
+  .wp-marker { width:14px; height:14px; border-radius:50%; border:2px solid #fff; cursor:grab; box-shadow:0 0 4px #000; }
+  .wp-marker:active { cursor: grabbing; }
 </style>
 </head>
 <body>
@@ -101,14 +101,15 @@
       <button id="btnView" class="active" onclick="setEdit(false)">👁️ Перегляд</button>
       <button id="btnEdit" class="gray" onclick="setEdit(true)">✏️ Редагування</button>
     </div>
-    <div class="hint">
-      <b>Схема:</b> тягнути пусте — навігація; тягнути маркер — рух; 2× на лінії — вставити; 2× на пустому — додати.<br>
-      <b>Карта:</b> навігація (пан/зум) як завжди, незалежно від режиму; тягнути маркер — рух; 2× — додати.<br>
-      <b>3D:</b> клік — вибрати; колесо (ред.) — висота.
+    <button class="gray" id="btnUndo" onclick="undo()" disabled style="font-size:12px;padding:6px">↩ Відмінити (Ctrl+Z)</button>
+    <div class="hint" style="margin-top:8px">
+      <b>Схема:</b> тягнути пусте — навігація; тягнути маркер — рух; 2× на лінії — вставити; 2× на пустому — додати; Esc — зняти вибір.<br>
+      <b>Карта:</b> навігація завжди доступна; тягнути маркер — рух; 2× — додати точку.<br>
+      <b>3D:</b> клік — вибрати; колесо — змінити висоту; обертати сцену — ліва кнопка.
     </div>
     <label>Висота вибраної точки (м)</label>
     <input type="number" id="altInput" value="0" step="5" disabled>
-    <button class="red" id="btnDel" onclick="deleteSelected()" disabled>🗑️ Видалити вибрану</button>
+    <button class="red" id="btnDel" onclick="deleteSelected()" disabled>🗑️ Видалити вибрану (Del)</button>
   </div>
 
   <div class="section">
@@ -148,6 +149,7 @@
 <script>
 const EARTH_R=6371.0, M_PER_DEG=111000.0, PREC=14, ALT_PREC=6;
 const UA_GEOJSON="https://raw.githubusercontent.com/georgique/world-geojson/develop/countries/ukraine.json";
+const MAX_UNDO=30;
 
 let state = {
   header:"QGC WPL 110", wps:[], baseline:[], editMode:false,
@@ -155,19 +157,45 @@ let state = {
 };
 let uaBorderData=null;
 
+// undo stack: each entry is a deep copy of state.wps
+let undoStack=[];
+
 // Canvas
 let nav={panX:0,panY:0,zoom:1};
-let dragPoint=null, draggingView=false, mouseStart={x:0,y:0};
-// Track whether a mousedown–mousemove actually moved (to distinguish click from drag in edit mode)
-let canvasDragMoved=false;
+let dragPoint=null, draggingView=false, mouseStart={x:0,y:0}, canvasDragMoved=false;
 let screenPts=[], bounds2d=null;
 
 // MapLibre
 let map=null, mapLoaded=false, mapMarkers=[], mapStyleType="sat";
+// rAF handle for map marker drag (throttle route-line updates to 60fps)
+let _mapDragRAF=null;
+
+// 3D
 let plot3dInited=false;
+// rAF handle for full 3D re-renders
+let _plot3dRAF=null;
+// Undo session guard for altitude wheel (one undo entry per continuous scroll)
+let _altUndoPushed=false, _altUndoTimer=null;
 
 const canvas=document.getElementById('canvas2d');
 const ctx=canvas.getContext('2d');
+
+// ───────── UNDO ─────────
+function pushUndo(){
+  undoStack.push(state.wps.map(w=>({...w,raw:[...w.raw]})));
+  if(undoStack.length>MAX_UNDO)undoStack.shift();
+  document.getElementById("btnUndo").disabled=false;
+}
+function undo(){
+  if(!undoStack.length)return;
+  state.wps=undoStack.pop().map(w=>({...w,raw:[...w.raw]}));
+  snapshot(); state.selected=null;
+  document.getElementById("altInput").disabled=true;
+  document.getElementById("btnDel").disabled=true;
+  document.getElementById("btnUndo").disabled=undoStack.length===0;
+  refreshAll();
+  setStatus(undoStack.length?"Відмінено. Залишилось кроків: "+undoStack.length:"Відмінено. Більше немає");
+}
 
 // ───────── МОДЕЛЬ ─────────
 function parseFile(text){
@@ -250,13 +278,17 @@ function handleDblInsert(lat,lon){
     const cLat=(Math.min(...lats)+Math.max(...lats))/2, lonM=M_PER_DEG*Math.cos(cLat*Math.PI/180);
     const wM=(Math.max(...lons)-Math.min(...lons))*lonM, hM=(Math.max(...lats)-Math.min(...lats))*M_PER_DEG;
     const diag=Math.hypot(wM,hM)||1, threshold=diag*0.05;
-    if(seg.dist<=threshold){ const pos=insertWaypoint(seg.position,seg.lat,seg.lon,null);
-      state.selected=pos; refreshAll(); setStatus("Вставлено точку #"+pos+" на маршрут"); return; }
+    if(seg.dist<=threshold){
+      pushUndo();
+      const pos=insertWaypoint(seg.position,seg.lat,seg.lon,null);
+      state.selected=pos; refreshAll(); setStatus("Вставлено точку #"+pos+" на маршрут"); return;
+    }
   }
+  pushUndo();
   const idx=addWaypoint(lat,lon); state.selected=idx; refreshAll(); setStatus("Додано точку #"+idx+" в кінець");
 }
 
-// ───────── ЗАВАНТАЖЕННЯ КОРДОНУ УКРАЇНИ ─────────
+// ───────── КОРДОН УКРАЇНИ ─────────
 function loadBorder(){
   if(uaBorderData)return Promise.resolve(uaBorderData);
   return fetch(UA_GEOJSON).then(r=>r.json()).then(data=>{ uaBorderData=data; return data; })
@@ -265,20 +297,16 @@ function loadBorder(){
 
 // ───────── MAPLIBRE ─────────
 function buildStyle(type){
-  const tiles = type==="sat"
-    ? ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}']
-    : ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'];
-  return { version:8,
-    sources:{ base:{ type:'raster', tiles:tiles, tileSize:256,
-      attribution: type==="sat"?'© Esri':'© OpenStreetMap' } },
-    layers:[{ id:'base', type:'raster', source:'base' }] };
+  const tiles=type==="sat"
+    ?['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}']
+    :['https://tile.openstreetmap.org/{z}/{x}/{y}.png'];
+  return {version:8, sources:{base:{type:'raster',tiles,tileSize:256,
+    attribution:type==="sat"?'© Esri':'© OpenStreetMap'}}, layers:[{id:'base',type:'raster',source:'base'}]};
 }
 function initMap(){
-  map=new maplibregl.Map({ container:'map', style:buildStyle('sat'),
-    center:[31.0,49.0], zoom:5, pitch:0, bearing:0,
-    maxPitch:85, doubleClickZoom:false });
+  map=new maplibregl.Map({container:'map',style:buildStyle('sat'),center:[31.0,49.0],zoom:5,
+    pitch:0,bearing:0,maxPitch:85,doubleClickZoom:false});
   map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'top-right');
-  // Pan/zoom/rotate always available regardless of edit mode
   map.dragRotate.enable(); map.touchZoomRotate.enableRotation();
   map.on('load',()=>{ mapLoaded=true; addBorderLayer(); addRouteLayers(); rebuildMarkers(); fitMapToRoute(true); });
   map.on('dblclick',e=>{ if(!state.editMode)return; e.preventDefault(); handleDblInsert(e.lngLat.lat,e.lngLat.lng); });
@@ -288,8 +316,8 @@ function addBorderLayer(){
   if(!map)return;
   if(!map.getSource('ua-border')){
     map.addSource('ua-border',{type:'geojson',data:{type:'FeatureCollection',features:[]}});
-    map.addLayer({ id:'ua-border-line', type:'line', source:'ua-border',
-      paint:{ 'line-color':'#ffd54f', 'line-width':3, 'line-opacity':0.9 } });
+    map.addLayer({id:'ua-border-line',type:'line',source:'ua-border',
+      paint:{'line-color':'#ffd54f','line-width':3,'line-opacity':0.9}});
   }
   loadBorder().then(data=>{
     if(data&&map.getSource('ua-border')){
@@ -298,45 +326,41 @@ function addBorderLayer(){
     }
   });
 }
-
 function addRouteLayers(){
   if(!map.getSource('route-stems')){
     map.addSource('route-stems',{type:'geojson',data:emptyFC()});
-    map.addLayer({ id:'stems', type:'fill-extrusion', source:'route-stems',
-      paint:{ 'fill-extrusion-color':['get','color'],
-        'fill-extrusion-height':['get','height'],
-        'fill-extrusion-base':0, 'fill-extrusion-opacity':0.85 } });
+    map.addLayer({id:'stems',type:'fill-extrusion',source:'route-stems',
+      paint:{'fill-extrusion-color':['get','color'],'fill-extrusion-height':['get','height'],
+        'fill-extrusion-base':0,'fill-extrusion-opacity':0.85}});
   }
   if(!map.getSource('route-tops')){
     map.addSource('route-tops',{type:'geojson',data:emptyFC()});
-    map.addLayer({ id:'routetops', type:'circle', source:'route-tops',
-      paint:{ 'circle-radius':5, 'circle-color':['get','color'],
-        'circle-stroke-color':'#fff', 'circle-stroke-width':1.5,
-        'circle-pitch-alignment':'map' } });
+    map.addLayer({id:'routetops',type:'circle',source:'route-tops',
+      paint:{'circle-radius':5,'circle-color':['get','color'],
+        'circle-stroke-color':'#fff','circle-stroke-width':1.5,'circle-pitch-alignment':'map'}});
   }
   if(!map.getSource('route-line')){
     map.addSource('route-line',{type:'geojson',data:emptyFC()});
-    map.addLayer({ id:'routeline', type:'line', source:'route-line',
-      paint:{ 'line-color':'#2196f3', 'line-width':3 } });
+    map.addLayer({id:'routeline',type:'line',source:'route-line',
+      paint:{'line-color':'#2196f3','line-width':3}});
   }
   if(!map.getSource('route-ground')){
     map.addSource('route-ground',{type:'geojson',data:emptyFC()});
-    map.addLayer({ id:'routeground', type:'line', source:'route-ground',
-      paint:{ 'line-color':'#000', 'line-width':2, 'line-dasharray':[2,2], 'line-opacity':0.4 } });
+    map.addLayer({id:'routeground',type:'line',source:'route-ground',
+      paint:{'line-color':'#000','line-width':2,'line-dasharray':[2,2],'line-opacity':0.4}});
   }
 }
 function emptyFC(){ return {type:'FeatureCollection',features:[]}; }
 function squareAround(lon,lat,sizeM){
   const lonM=M_PER_DEG*Math.cos(lat*Math.PI/180);
   const dLon=(sizeM/2)/lonM, dLat=(sizeM/2)/M_PER_DEG;
-  return [[ [lon-dLon,lat-dLat],[lon+dLon,lat-dLat],
-            [lon+dLon,lat+dLat],[lon-dLon,lat+dLat],[lon-dLon,lat-dLat] ]];
+  return [[[lon-dLon,lat-dLat],[lon+dLon,lat-dLat],[lon+dLon,lat+dLat],[lon-dLon,lat+dLat],[lon-dLon,lat-dLat]]];
 }
 
+// FULL update — all 4 GeoJSON sources. Call on structural changes and dragend.
 function updateRouteLayers(){
   if(!map||!mapLoaded)return;
   const v=valid(); const zExag=+document.getElementById("zExag").value||1;
-
   const stemFeats=[], topFeats=[];
   v.forEach((w,k)=>{
     const gi=globalIndexOfValid(k);
@@ -344,45 +368,107 @@ function updateRouteLayers(){
     if(state.selected===gi)color='#ffeb3b';
     else if(k===0)color='#2e7d32';
     else if(k===v.length-1)color='#f44336';
-    const h=Math.max(0.1, w.alt*zExag);
-    stemFeats.push({ type:'Feature',
-      properties:{ color, height:h, gi },
-      geometry:{ type:'Polygon', coordinates:squareAround(w.lon,w.lat,15) } });
-    topFeats.push({ type:'Feature', properties:{ color },
-      geometry:{ type:'Point', coordinates:[w.lon,w.lat] } });
+    stemFeats.push({type:'Feature',
+      properties:{color,height:Math.max(0.1,w.alt*zExag),gi},
+      geometry:{type:'Polygon',coordinates:squareAround(w.lon,w.lat,15)}});
+    topFeats.push({type:'Feature',properties:{color},
+      geometry:{type:'Point',coordinates:[w.lon,w.lat]}});
   });
   map.getSource('route-stems').setData({type:'FeatureCollection',features:stemFeats});
   map.getSource('route-tops').setData({type:'FeatureCollection',features:topFeats});
-
   const coords=v.map(w=>[w.lon,w.lat]);
-  const lineFC = coords.length>1?[{type:'Feature',geometry:{type:'LineString',coordinates:coords}}]:[];
+  const lineFC=coords.length>1?[{type:'Feature',geometry:{type:'LineString',coordinates:coords}}]:[];
   map.getSource('route-line').setData({type:'FeatureCollection',features:lineFC});
   map.getSource('route-ground').setData({type:'FeatureCollection',features:lineFC});
 }
+
+// FAST update — only route lines (for during-drag, no polygon rebuild).
+function updateRouteLineOnly(){
+  if(!map||!mapLoaded)return;
+  const coords=valid().map(w=>[w.lon,w.lat]);
+  const lineFC=coords.length>1?[{type:'Feature',geometry:{type:'LineString',coordinates:coords}}]:[];
+  const fc={type:'FeatureCollection',features:lineFC};
+  map.getSource('route-line').setData(fc);
+  map.getSource('route-ground').setData(fc);
+}
+
+// FAST update — only stems+tops colors (for selection change, no line rebuild).
+function updateMapSelectionColors(){
+  if(!map||!mapLoaded)return;
+  const v=valid(); const zExag=+document.getElementById("zExag").value||1;
+  const stemFeats=[], topFeats=[];
+  v.forEach((w,k)=>{
+    const gi=globalIndexOfValid(k);
+    let color='#4caf50';
+    if(state.selected===gi)color='#ffeb3b';
+    else if(k===0)color='#2e7d32';
+    else if(k===v.length-1)color='#f44336';
+    stemFeats.push({type:'Feature',
+      properties:{color,height:Math.max(0.1,w.alt*zExag),gi},
+      geometry:{type:'Polygon',coordinates:squareAround(w.lon,w.lat,15)}});
+    topFeats.push({type:'Feature',properties:{color},
+      geometry:{type:'Point',coordinates:[w.lon,w.lat]}});
+  });
+  map.getSource('route-stems').setData({type:'FeatureCollection',features:stemFeats});
+  map.getSource('route-tops').setData({type:'FeatureCollection',features:topFeats});
+}
+
+// Update only DOM styles of existing markers (no destroy/recreate).
+function updateMapMarkerStyles(){
+  if(!map||!mapLoaded)return;
+  const v=state.wps.map((w,i)=>({w,i})).filter(o=>o.w.lat!==0||o.w.lon!==0);
+  mapMarkers.forEach((marker,k)=>{
+    if(k>=v.length)return;
+    const{w,i}=v[k]; const el=marker.getElement(); const sel=state.selected===i;
+    let bg=k===0?'#2e7d32':k===v.length-1?'#f44336':'#4caf50';
+    el.style.background=sel?'#ffeb3b':bg;
+    el.style.borderColor=sel?'#ff9800':'#fff';
+    el.title="#"+i+" • "+w.alt.toFixed(0)+" м";
+  });
+  updateMapSelectionColors();
+}
+
 function globalIndexOfValid(localIdx){
   const v=state.wps.map((w,i)=>({w,i})).filter(o=>o.w.lat!==0||o.w.lon!==0);
   return v[localIdx]?v[localIdx].i:localIdx;
 }
+
+// Full DOM rebuild — only for: file load, add/delete waypoint, toggle editMode.
 function rebuildMarkers(){
   if(!map||!mapLoaded)return;
   mapMarkers.forEach(m=>m.remove()); mapMarkers=[];
   const v=state.wps.map((w,i)=>({w,i})).filter(o=>o.w.lat!==0||o.w.lon!==0);
   v.forEach((o,k)=>{
-    const {w,i}=o;
+    const{w,i}=o;
     const el=document.createElement('div'); el.className='wp-marker';
     let bg='#4caf50'; if(k===0)bg='#2e7d32'; else if(k===v.length-1)bg='#f44336';
-    if(state.selected===i){ bg='#ffeb3b'; el.style.borderColor='#ff9800'; }
+    if(state.selected===i){bg='#ffeb3b';el.style.borderColor='#ff9800';}
     el.style.background=bg; el.title="#"+i+" • "+w.alt.toFixed(0)+" м";
     const marker=new maplibregl.Marker({element:el,draggable:state.editMode})
       .setLngLat([w.lon,w.lat]).addTo(map);
-    el.addEventListener('click',ev=>{ ev.stopPropagation(); selectPoint(i); });
-    marker.on('dragstart',()=>selectPoint(i));
-    marker.on('drag',()=>{ const ll=marker.getLngLat(); moveWaypoint(i,ll.lat,ll.lng); updateRouteLayers(); });
-    marker.on('dragend',()=>{ refreshTable(); refreshInfo(); });
+    el.addEventListener('click',ev=>{ev.stopPropagation();selectPoint(i);});
+    marker.on('dragstart',()=>{
+      pushUndo();
+      selectPoint(i);
+    });
+    marker.on('drag',()=>{
+      const ll=marker.getLngLat();
+      moveWaypoint(i,ll.lat,ll.lng);
+      // Throttle line update to rAF — skip polygon rebuild during drag
+      if(!_mapDragRAF){
+        _mapDragRAF=requestAnimationFrame(()=>{ _mapDragRAF=null; updateRouteLineOnly(); });
+      }
+    });
+    marker.on('dragend',()=>{
+      // Full update after drag completes (stems, colors, table)
+      updateRouteLayers();
+      refreshTable(); refreshInfo();
+    });
     mapMarkers.push(marker);
   });
   updateRouteLayers();
 }
+
 function fitMapToRoute(animate){
   if(!map||!mapLoaded)return; const v=valid(); if(!v.length)return;
   const b=new maplibregl.LngLatBounds(); v.forEach(w=>b.extend([w.lon,w.lat]));
@@ -402,6 +488,7 @@ function toggleBorder(){
 function resizeCanvas(){ const r=canvas.getBoundingClientRect();
   canvas.width=r.width;canvas.height=r.height; if(state.view==="canvas")draw2D(); }
 window.addEventListener('resize',resizeCanvas);
+
 function draw2D(){
   const W=canvas.width,H=canvas.height;
   ctx.clearRect(0,0,W,H); ctx.fillStyle="#222"; ctx.fillRect(0,0,W,H);
@@ -422,7 +509,7 @@ function draw2D(){
   const plotW=wMeters*sc,plotH=hMeters*sc;
   const offX=margin+(availW-plotW)/2,offY=margin+(availH-plotH)/2;
   bounds2d={minLon,maxLon,minLat,maxLat,lonM,sc,offX,offY,plotH};
-  function toPx(lon,lat){ let bx=offX+(lon-minLon)*lonM*sc, by=offY+plotH-(lat-minLat)*M_PER_DEG*sc;
+  function toPx(lon,lat){ let bx=offX+(lon-minLon)*lonM*sc,by=offY+plotH-(lat-minLat)*M_PER_DEG*sc;
     return [(bx-W/2)*nav.zoom+W/2+nav.panX,(by-H/2)*nav.zoom+H/2+nav.panY]; }
   ctx.strokeStyle="#2196f3";ctx.lineWidth=2.5;ctx.beginPath();
   v.forEach((o,k)=>{const p=toPx(o.w.lon,o.w.lat);k===0?ctx.moveTo(p[0],p[1]):ctx.lineTo(p[0],p[1]);});ctx.stroke();
@@ -439,7 +526,7 @@ function draw2D(){
   drawScaleBar(W,H,sc*nav.zoom);
   ctx.fillStyle="#fff";ctx.font="bold 13px Arial";ctx.textAlign="center";ctx.fillText("📊 Схема (рівний масштаб)",W/2,20);
   ctx.fillStyle="#888";ctx.font="11px Arial";
-  ctx.fillText(state.editMode?"Тягнути пусте — навігація | Тягнути маркер — рух | 2× — додати | ПКМ — скинути вигляд":"Drag — рух | Колесо — масштаб | ПКМ — скидання",W/2,40);
+  ctx.fillText(state.editMode?"Тягнути пусте — навігація | Тягнути маркер — рух | 2× — додати | Esc — зняти | ПКМ — скинути вигляд":"Drag — навігація | Колесо — масштаб | ПКМ — скидання",W/2,40);
 }
 function drawScaleBar(W,H,pxPerMeter){ if(!isFinite(pxPerMeter)||pxPerMeter<=0)return;
   let meters=100/pxPerMeter; const nice=[1,2,5,10,20,50,100,200,500,1000,2000,5000,10000,20000,50000,100000];
@@ -452,72 +539,103 @@ function drawScaleBar(W,H,pxPerMeter){ if(!isFinite(pxPerMeter)||pxPerMeter<=0)r
   ctx.fillText(chosen>=1000?(chosen/1000)+" км":chosen+" м",x0+barPx+6,y0+3); }
 function pixelToCoord(px,py){ const b=bounds2d; if(!b||nav.zoom===0)return null;
   const W=canvas.width,H=canvas.height;
-  let bx=(px-W/2-nav.panX)/nav.zoom+W/2, by=(py-H/2-nav.panY)/nav.zoom+H/2;
-  let lon=b.minLon+(bx-b.offX)/(b.lonM*b.sc), lat=b.minLat+(b.offY+b.plotH-by)/(M_PER_DEG*b.sc);
-  return [lon,lat]; }
+  let bx=(px-W/2-nav.panX)/nav.zoom+W/2,by=(py-H/2-nav.panY)/nav.zoom+H/2;
+  return [b.minLon+(bx-b.offX)/(b.lonM*b.sc), b.minLat+(b.offY+b.plotH-by)/(M_PER_DEG*b.sc)]; }
 function hitTest(px,py){ let bi=null,bd=12;
   screenPts.forEach(p=>{const d=Math.hypot(p.x-px,p.y-py);if(d<=bd){bd=d;bi=p.idx;}}); return bi; }
 function getXY(e){const r=canvas.getBoundingClientRect();return[e.clientX-r.left,e.clientY-r.top];}
 
-// Canvas mouse events — support pan navigation in edit mode when dragging on empty space
 canvas.addEventListener('mousedown',e=>{
-  const xy=getXY(e);
-  mouseStart={x:xy[0],y:xy[1]};
-  canvasDragMoved=false;
+  const xy=getXY(e); mouseStart={x:xy[0],y:xy[1]}; canvasDragMoved=false;
   if(state.editMode){
     const hit=hitTest(xy[0],xy[1]);
-    if(hit!==null){ dragPoint=hit; selectPoint(hit); }
-    else { draggingView=true; } // empty space — may pan or just deselect on click
+    if(hit!==null){
+      pushUndo(); // save before drag
+      dragPoint=hit; selectPoint(hit);
+      canvas.style.cursor='grabbing';
+    } else {
+      draggingView=true;
+      canvas.style.cursor='move';
+    }
     return;
   }
   draggingView=true;
+  canvas.style.cursor='move';
 });
 
 canvas.addEventListener('mousemove',e=>{
   const xy=getXY(e);
+  // Update cursor hint in edit mode when hovering
+  if(state.editMode&&dragPoint===null&&!draggingView){
+    canvas.style.cursor=hitTest(xy[0],xy[1])!==null?'grab':'crosshair';
+  }
   if(state.editMode&&dragPoint!==null){
     const c=pixelToCoord(xy[0],xy[1]);
     if(c){moveWaypoint(dragPoint,Math.max(-90,Math.min(90,c[1])),Math.max(-180,Math.min(180,c[0])));draw2D();}
     return;
   }
   if(!draggingView)return;
-  const dx=xy[0]-mouseStart.x, dy=xy[1]-mouseStart.y;
-  if(Math.hypot(dx,dy)>3) canvasDragMoved=true;
+  const dx=xy[0]-mouseStart.x,dy=xy[1]-mouseStart.y;
+  if(Math.hypot(dx,dy)>3)canvasDragMoved=true;
   nav.panX+=dx; nav.panY+=dy;
   mouseStart={x:xy[0],y:xy[1]};
   draw2D();
 });
 
 canvas.addEventListener('mouseup',()=>{
-  // In edit mode: if we were panning empty space but didn't move — treat as deselect click
-  if(state.editMode&&draggingView&&!canvasDragMoved) selectPoint(null);
+  if(state.editMode&&draggingView&&!canvasDragMoved)selectPoint(null);
+  if(dragPoint!==null){refreshTable();refreshInfo();}
+  dragPoint=null; draggingView=false;
+  canvas.style.cursor=state.editMode?'crosshair':'crosshair';
+});
+
+canvas.addEventListener('mouseleave',()=>{
+  canvas.style.cursor='crosshair';
   if(dragPoint!==null){refreshTable();refreshInfo();}
   dragPoint=null; draggingView=false;
 });
 
-canvas.addEventListener('dblclick',e=>{ if(!state.editMode)return; const xy=getXY(e);
+canvas.addEventListener('dblclick',e=>{
+  if(!state.editMode)return; const xy=getXY(e);
   if(hitTest(xy[0],xy[1])!==null)return;
-  const c=pixelToCoord(xy[0],xy[1]); if(c)handleDblInsert(Math.max(-90,Math.min(90,c[1])),Math.max(-180,Math.min(180,c[0]))); });
+  const c=pixelToCoord(xy[0],xy[1]);
+  if(c)handleDblInsert(Math.max(-90,Math.min(90,c[1])),Math.max(-180,Math.min(180,c[0])));
+});
 canvas.addEventListener('wheel',e=>{e.preventDefault();nav.zoom*=(e.deltaY<0)?1.1:0.9;nav.zoom=Math.max(0.3,Math.min(8,nav.zoom));draw2D();},{passive:false});
 canvas.addEventListener('contextmenu',e=>{e.preventDefault();nav={panX:0,panY:0,zoom:1};draw2D();});
-window.addEventListener('keydown',e=>{if((e.key==="Delete"||e.key==="Backspace")&&state.editMode&&state.selected!=null)deleteSelected();});
+
+window.addEventListener('keydown',e=>{
+  if((e.ctrlKey||e.metaKey)&&e.key==='z'){e.preventDefault();undo();return;}
+  if(e.key==='Escape'&&state.editMode){selectPoint(null);return;}
+  if((e.key==='Delete'||e.key==='Backspace')&&state.editMode&&state.selected!=null){e.preventDefault();deleteSelected();}
+});
 
 // ───────── 3D ГРАФІК (Plotly) ─────────
 function build3DData(){
   const v=valid(); if(!v.length)return null;
   const c=center(),lonM=M_PER_DEG*Math.cos(c.lat*Math.PI/180);
   const zExag=+document.getElementById("zExag").value||1;
-  const xs=v.map(o=>(o.lon-c.lon)*lonM);
-  const ys=v.map(o=>(o.lat-c.lat)*M_PER_DEG);
-  const zs=v.map(o=>o.alt*zExag);
-  return {v,c,lonM,zExag,xs,ys,zs};
+  return {
+    v, c, lonM, zExag,
+    xs:v.map(o=>(o.lon-c.lon)*lonM),
+    ys:v.map(o=>(o.lat-c.lat)*M_PER_DEG),
+    zs:v.map(o=>o.alt*zExag)
+  };
 }
+
+// Throttled full 3D rebuild (structural changes)
+function scheduleDraw3D(){
+  if(_plot3dRAF)return;
+  _plot3dRAF=requestAnimationFrame(()=>{_plot3dRAF=null;draw3D();});
+}
+
+// Full rebuild — traces, layout, ground plane. On structure change or view switch.
 function draw3D(){
   const el=document.getElementById('plot3d');
   if(window.PLOTLY_FAILED||typeof Plotly==="undefined"){
     el.innerHTML='<div style="color:#888;text-align:center;padding-top:40vh;">3D потребує Plotly (інтернет).</div>';return;}
   const d=build3DData(); if(!d){Plotly.purge('plot3d');plot3dInited=false;return;}
-  const {v,xs,ys,zs,zExag}=d;
+  const{v,xs,ys,zs,zExag}=d;
   const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
   const padX=(maxX-minX)*0.2||100,padY=(maxY-minY)*0.2||100;
   const gx0=minX-padX,gx1=maxX+padX,gy0=minY-padY,gy1=maxY+padY;
@@ -528,20 +646,25 @@ function draw3D(){
   const ground={type:'surface',x:planeX,y:planeY,z:planeZ,showscale:false,opacity:0.35,
     colorscale:[[0,'#2e4a2e'],[1,'#3a5a3a']],hoverinfo:'skip',
     contours:{x:{show:true,color:'#557755',width:1},y:{show:true,color:'#557755',width:1}}};
+  // trace 1: shadow
   const shadow={x:xs,y:ys,z:xs.map(()=>0),mode:'lines',type:'scatter3d',
     line:{color:'#000',width:3,dash:'dot'},opacity:0.4,hoverinfo:'skip'};
+  // trace 2: stems
   const stemsX=[],stemsY=[],stemsZ=[];
   v.forEach((o,i)=>{stemsX.push(xs[i],xs[i],null);stemsY.push(ys[i],ys[i],null);stemsZ.push(0,zs[i],null);});
   const stems={x:stemsX,y:stemsY,z:stemsZ,mode:'lines',type:'scatter3d',
     line:{color:'#888',width:1},opacity:0.5,hoverinfo:'skip'};
+  // trace 3: path
+  const markerSizes=v.map((w,i)=>state.selected===globalIndexOfValid(i)?11:(i===0||i===v.length-1?8:5));
+  const markerColors=v.map((w,i)=>{const gi=globalIndexOfValid(i);
+    return state.selected===gi?'#ffeb3b':(i===0?'#4caf50':(i===v.length-1?'#f44336':'#64b5f6'));});
   const path={x:xs,y:ys,z:zs,mode:'lines+markers',type:'scatter3d',line:{color:'#64b5f6',width:5},
-    marker:{size:v.map((w,i)=>state.selected===globalIndexOfValid(i)?11:(i===0||i===v.length-1?8:5)),
-      color:v.map((w,i)=>{const gi=globalIndexOfValid(i);return state.selected===gi?'#ffeb3b':(i===0?'#4caf50':(i===v.length-1?'#f44336':'#64b5f6'));}),
-      line:{color:'#fff',width:1}},
+    marker:{size:markerSizes,color:markerColors,line:{color:'#fff',width:1}},
     text:v.map((w,i)=>"#"+globalIndexOfValid(i)+"<br>alt: "+w.alt.toFixed(0)+" м<br>lat: "+w.lat.toFixed(5)+"<br>lon: "+w.lon.toFixed(5)),
     hoverinfo:'text',customdata:v.map((w,i)=>globalIndexOfValid(i))};
   const layout={paper_bgcolor:'#1a1a1a',font:{color:'#ccc'},margin:{l:0,r:0,t:30,b:0},showlegend:false,
-    title:{text:(state.editMode?'✏️ 3D Редагування':'🎯 3D')+(zExag!==1?' (висота ×'+zExag+')':'')+' — клік: вибір, колесо: висота',font:{color:'#fff',size:13}},
+    title:{text:(state.editMode?'✏️ 3D Редагування':'🎯 3D')+(zExag!==1?' (висота ×'+zExag+')':'')+
+      ' — клік: вибір, колесо (ред.): висота',font:{color:'#fff',size:13}},
     scene:{aspectmode:'data',
       xaxis:{title:'Схід (м)',color:'#f44336',gridcolor:'#333'},
       yaxis:{title:'Північ (м)',color:'#4caf50',gridcolor:'#333'},
@@ -554,15 +677,47 @@ function draw3D(){
       const pt=ev.points.find(p=>p.customdata!=null); if(pt)selectPoint(pt.customdata); }); }
 }
 
+// FAST: restyle only stems (trace 2) + path z/markers (trace 3). No ground rebuild.
+function update3DFast(){
+  if(!plot3dInited||window.PLOTLY_FAILED||typeof Plotly==="undefined"){scheduleDraw3D();return;}
+  const d=build3DData(); if(!d){scheduleDraw3D();return;}
+  const{v,xs,ys,zs}=d;
+  const sx=[],sy=[],sz=[];
+  v.forEach((o,i)=>{sx.push(xs[i],xs[i],null);sy.push(ys[i],ys[i],null);sz.push(0,zs[i],null);});
+  const sizes=v.map((w,i)=>state.selected===globalIndexOfValid(i)?11:(i===0||i===v.length-1?8:5));
+  const colors=v.map((w,i)=>{const gi=globalIndexOfValid(i);
+    return state.selected===gi?'#ffeb3b':(i===0?'#4caf50':(i===v.length-1?'#f44336':'#64b5f6'));});
+  Plotly.restyle('plot3d',{x:[sx],y:[sy],z:[sz]},[2]);
+  Plotly.restyle('plot3d',{z:[zs],'marker.size':[sizes],'marker.color':[colors]},[3]);
+}
+
+// FAST: restyle only marker colors/sizes in path trace (selection change only).
+function update3DSelection(){
+  if(!plot3dInited||window.PLOTLY_FAILED||typeof Plotly==="undefined")return;
+  const d=build3DData(); if(!d)return;
+  const{v}=d;
+  const sizes=v.map((w,i)=>state.selected===globalIndexOfValid(i)?11:(i===0||i===v.length-1?8:5));
+  const colors=v.map((w,i)=>{const gi=globalIndexOfValid(i);
+    return state.selected===gi?'#ffeb3b':(i===0?'#4caf50':(i===v.length-1?'#f44336':'#64b5f6'));});
+  Plotly.restyle('plot3d',{'marker.size':[sizes],'marker.color':[colors]},[3]);
+}
+
 // ───────── UI ─────────
 function isMapView(){return state.view==="sat"||state.view==="osm";}
-function selectPoint(i){ state.selected=i; const w=state.wps[i];
+
+function selectPoint(i){
+  state.selected=i; const w=state.wps[i];
   const a=document.getElementById("altInput"); if(w)a.value=w.alt.toFixed(1);
   a.disabled=!(state.editMode&&i!=null);
   document.getElementById("btnDel").disabled=!(state.editMode&&i!=null);
   if(i!=null)setStatus("Вибрано точку #"+i);
-  if(state.view==="canvas")draw2D(); else if(isMapView())rebuildMarkers(); else draw3D();
-  refreshTable(); }
+  // Use fast update paths — no full rebuild
+  if(state.view==="canvas")draw2D();
+  else if(isMapView())updateMapMarkerStyles(); // just CSS + 2 GeoJSON sources
+  else update3DSelection();                    // just Plotly.restyle marker
+  refreshTable();
+}
+
 function refreshTable(){ const tb=document.querySelector("#wpTable tbody");tb.innerHTML="";
   state.wps.forEach((w,i)=>{ if(w.lat===0&&w.lon===0)return; const tr=document.createElement("tr");
     if(state.selected===i)tr.className="sel";
@@ -573,7 +728,14 @@ function refreshInfo(){ const b=document.getElementById("infoBox");
   const c=center(),e=endPoint(),d=totalDistance(),n=valid().length;
   const alts=valid().map(w=>w.alt),minA=Math.min(...alts),maxA=Math.max(...alts);
   b.textContent="Точок: "+n+"\nДистанція: "+d.toFixed(2)+" км\nВисота: "+minA.toFixed(0)+"–"+maxA.toFixed(0)+" м\n\nЦентр:\n"+c.lat.toFixed(4)+"° "+c.lon.toFixed(4)+"°\n\nКінець:\n"+e.lat.toFixed(4)+"° "+e.lon.toFixed(4)+"°"; }
-function refreshAll(){ if(state.view==="canvas")draw2D(); else if(isMapView())rebuildMarkers(); else draw3D(); refreshTable();refreshInfo(); }
+
+// refreshAll — for structural changes (add/delete/transform/mode switch)
+function refreshAll(){
+  if(state.view==="canvas")draw2D();
+  else if(isMapView())rebuildMarkers(); // full DOM rebuild appropriate for structural change
+  else scheduleDraw3D();               // throttled full Plotly rebuild
+  refreshTable();refreshInfo();
+}
 function setStatus(t){document.getElementById("status").textContent=t;}
 
 function switchView(v){
@@ -586,33 +748,43 @@ function switchView(v){
   document.getElementById("tabOsm").classList.toggle("active",v==="osm");
   document.getElementById("tab3d").classList.toggle("active",v==="3d");
   document.getElementById("zCtrl").style.display=(v==="3d"||isMapView())?"flex":"none";
-  if(v==="canvas"){ resizeCanvas(); }
+  if(v==="canvas"){resizeCanvas();}
   else if(isMapView()){
-    if(!map){ initMap(); }
-    else { if(mapStyleType!==v) setMapStyle(v);
-      setTimeout(()=>{ map.resize(); rebuildMarkers(); fitMapToRoute(true); },60); }
+    if(!map){initMap();}
+    else{ if(mapStyleType!==v)setMapStyle(v);
+      setTimeout(()=>{map.resize();rebuildMarkers();fitMapToRoute(true);},60); }
   }
-  else { plot3dInited=false; draw3D(); }
+  else{plot3dInited=false;draw3D();}
 }
 
-function setEdit(on){ state.editMode=on;
+function setEdit(on){
+  state.editMode=on;
   const angle=+document.getElementById("angle").value,scale=+document.getElementById("scale").value;
-  if(on&&(angle!==0||scale!==1)){ snapshot();
-    setAngleUI(0); setScaleUI(1); }
+  if(on&&(angle!==0||scale!==1)){snapshot();setAngleUI(0);setScaleUI(1);}
   document.getElementById("btnView").classList.toggle("active",!on);
   document.getElementById("btnEdit").classList.toggle("active",on);
   document.getElementById("btnView").classList.toggle("gray",on);
   document.getElementById("btnEdit").classList.toggle("gray",!on);
   document.getElementById("altInput").disabled=!(on&&state.selected!=null);
   document.getElementById("btnDel").disabled=!(on&&state.selected!=null);
-  setStatus(on?"Режим редагування":"Режим перегляду"); refreshAll(); }
+  // Clear undo session guard when toggling mode
+  _altUndoPushed=false; clearTimeout(_altUndoTimer);
+  setStatus(on?"Режим редагування (Ctrl+Z — відмінити)":"Режим перегляду");
+  refreshAll();
+}
 
-function deleteSelected(){ if(state.selected==null)return; const i=state.selected;
-  if(deleteWaypoint(i)){state.selected=null;
-    document.getElementById("btnDel").disabled=true;document.getElementById("altInput").disabled=true;
-    refreshAll();setStatus("Точку #"+i+" видалено");} }
+function deleteSelected(){
+  if(state.selected==null)return; const i=state.selected;
+  pushUndo();
+  if(deleteWaypoint(i)){
+    state.selected=null;
+    document.getElementById("btnDel").disabled=true;
+    document.getElementById("altInput").disabled=true;
+    refreshAll(); setStatus("Точку #"+i+" видалено");
+  }
+}
 
-// ───────── HELPERS для синхронізації UI кута/масштабу ─────────
+// ───────── HELPERS кут/масштаб ─────────
 function setAngleUI(v){
   v=Math.max(-360,Math.min(360,v));
   document.getElementById("angle").value=v;
@@ -625,16 +797,13 @@ function setScaleUI(v){
   document.getElementById("scaleNum").value=v.toFixed(1);
   document.getElementById("scaleVal").textContent=v.toFixed(1);
 }
-
-function resetTransform(){
-  setAngleUI(0); setScaleUI(1); applyTransform();
-}
-function resetAll(){ resetTransform(); nav={panX:0,panY:0,zoom:1}; refreshAll(); setStatus("Скинуто"); }
+function resetTransform(){setAngleUI(0);setScaleUI(1);applyTransform();}
+function resetAll(){resetTransform();nav={panX:0,panY:0,zoom:1};undoStack=[];document.getElementById("btnUndo").disabled=true;refreshAll();setStatus("Скинуто");}
 function saveFile(){ if(!state.wps.length){alert("Спочатку завантажте файл!");return;}
   const blob=new Blob([buildText()],{type:"text/plain"});const a=document.createElement("a");
   a.href=URL.createObjectURL(blob);a.download="modified_"+state.fileName;a.click();setStatus("Файл збережено"); }
 
-// ───────── СЛАЙДЕР + NUM INPUT — двостороння синхронізація ─────────
+// ───────── LISTENERS ─────────
 document.getElementById("angle").addEventListener("input",e=>{
   const v=+e.target.value;
   document.getElementById("angleVal").textContent=v;
@@ -648,11 +817,9 @@ document.getElementById("angleNum").addEventListener("input",e=>{
   applyTransform();
 });
 document.getElementById("angleNum").addEventListener("change",e=>{
-  // Clamp and reformat on blur/enter
   const v=Math.max(-360,Math.min(360,+e.target.value||0));
   setAngleUI(v); applyTransform();
 });
-
 document.getElementById("scale").addEventListener("input",e=>{
   const v=+e.target.value;
   document.getElementById("scaleVal").textContent=v.toFixed(1);
@@ -669,34 +836,59 @@ document.getElementById("scaleNum").addEventListener("change",e=>{
   const v=Math.max(0.1,Math.min(3,+e.target.value||1));
   setScaleUI(v); applyTransform();
 });
-
 document.getElementById("rotateFrom").addEventListener("change",applyTransform);
 document.getElementById("scaleFrom").addEventListener("change",applyTransform);
-document.getElementById("altInput").addEventListener("change",e=>{ if(state.selected!=null){
-  setAltitude(state.selected,+e.target.value);refreshAll();setStatus("Точка #"+state.selected+": висота = "+(+e.target.value).toFixed(0)+" м");}});
-document.getElementById("zExag").addEventListener("input",e=>{document.getElementById("zExagVal").textContent=e.target.value+"×";
-  if(state.view==="3d")draw3D(); else if(isMapView())updateRouteLayers(); });
+
+document.getElementById("altInput").addEventListener("change",e=>{
+  if(state.selected!=null){
+    pushUndo();
+    setAltitude(state.selected,+e.target.value);
+    refreshTable(); refreshInfo();
+    // Fast partial refresh — no full rebuild
+    if(state.view==="canvas")draw2D();
+    else if(isMapView())updateMapSelectionColors();
+    else update3DFast();
+    setStatus("Точка #"+state.selected+": висота = "+(+e.target.value).toFixed(0)+" м");
+  }
+});
+
+document.getElementById("zExag").addEventListener("input",e=>{
+  document.getElementById("zExagVal").textContent=e.target.value+"×";
+  if(state.view==="3d")scheduleDraw3D(); // throttled full redraw (axis title + data)
+  else if(isMapView())updateRouteLayers();
+});
+
+// 3D altitude wheel: Plotly.restyle only, one undo entry per continuous scroll session
 document.getElementById("plot3d").addEventListener("wheel",e=>{
   if(state.view==="3d"&&state.editMode&&state.selected!=null){
     e.preventDefault();
-    const step=(e.deltaY<0)?5:-5,w=state.wps[state.selected];
-    setAltitude(state.selected,(w.alt+step));
+    // Push undo only at start of a scroll burst, not every tick
+    if(!_altUndoPushed){pushUndo();_altUndoPushed=true;}
+    clearTimeout(_altUndoTimer);
+    _altUndoTimer=setTimeout(()=>{_altUndoPushed=false;},800);
+    const step=(e.deltaY<0)?5:-5;
+    setAltitude(state.selected,(state.wps[state.selected].alt+step));
     document.getElementById("altInput").value=state.wps[state.selected].alt.toFixed(1);
-    refreshTable();refreshInfo();draw3D();
-    setStatus("Точка #"+state.selected+": висота = "+state.wps[state.selected].alt.toFixed(0)+" м"); }
+    refreshTable(); refreshInfo();
+    update3DFast(); // restyle only — no Plotly.react
+    setStatus("Точка #"+state.selected+": висота = "+state.wps[state.selected].alt.toFixed(0)+" м");
+  }
 },{passive:false});
+
 document.getElementById("fileInput").addEventListener("change",e=>{
-  const f=e.target.files[0];if(!f)return;state.fileName=f.name;
+  const f=e.target.files[0]; if(!f)return; state.fileName=f.name;
   const r=new FileReader();
   r.onload=ev=>{ if(parseFile(ev.target.result)){
-    document.getElementById("fileName").textContent="✅ "+f.name; resetTransform();
-    nav={panX:0,panY:0,zoom:1}; refreshInfo();refreshTable();
+    document.getElementById("fileName").textContent="✅ "+f.name;
+    undoStack=[]; document.getElementById("btnUndo").disabled=true;
+    resetTransform(); nav={panX:0,panY:0,zoom:1}; refreshInfo(); refreshTable();
     if(state.view==="canvas")resizeCanvas();
-    else if(isMapView()){ if(map&&mapLoaded){rebuildMarkers();fitMapToRoute(true);} }
-    else draw3D();
+    else if(isMapView()){if(map&&mapLoaded){rebuildMarkers();fitMapToRoute(true);}}
+    else{plot3dInited=false;draw3D();}
     setStatus("Завантажено "+state.wps.length+" точок");
   } else alert("Не вдалося розібрати файл! Потрібен формат QGC WPL 110"); };
-  r.readAsText(f); });
+  r.readAsText(f);
+});
 
 resizeCanvas();
 </script>
